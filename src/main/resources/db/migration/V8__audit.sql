@@ -32,5 +32,6 @@ SELECT util.ensure_monthly_partitions('audit.events', 3);
 CREATE INDEX events_tenant_action_idx ON audit.events (tenant_id, action, occurred_at DESC);
 
 SELECT util.enable_tenant_rls('audit.events');
--- Append-only for the application role: INSERT and SELECT only.
-REVOKE UPDATE, DELETE ON audit.events FROM rbac_app;
+-- Append-only for both application roles: INSERT and SELECT only. Retention drops whole partitions
+-- through the SECURITY DEFINER util.drop_partitions_older_than.
+REVOKE UPDATE, DELETE ON audit.events FROM rbac_app, rbac_admin;

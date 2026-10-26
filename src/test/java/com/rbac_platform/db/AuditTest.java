@@ -52,6 +52,25 @@ class AuditTest {
     }
 
     @Test
+    void adminRoleCannotUpdateOrDeleteEventsButRetentionStillWorks() {
+        UUID t = db.insertTenant();
+        db.inTx("rbac_admin", null, c -> exec(c, INSERT_EVENT, t));
+
+        assertThat(sqlState(() -> db.inTx("rbac_admin", null, c ->
+                exec(c, "update audit.events set outcome = 'failure' where tenant_id = ?", t)))).isEqualTo("42501");
+        assertThat(sqlState(() -> db.inTx("rbac_admin", null, c ->
+                exec(c, "delete from audit.events where tenant_id = ?", t)))).isEqualTo("42501");
+        db.inTx("rbac_admin", null, c -> {
+            assertThat(count(c, "select count(*) from audit.events where tenant_id = ?", t)).isEqualTo(1);
+            // Retention goes through the SECURITY DEFINER partition drop (nothing is that old here).
+            assertThat(one(c, Integer.class,
+                    "select util.drop_partitions_older_than('audit.events'::regclass, interval '100 years')"))
+                    .isZero();
+            return null;
+        });
+    }
+
+    @Test
     void actorTypeAndOutcomeAreChecked() {
         UUID t = db.insertTenant();
         assertThat(sqlState(() -> db.inTx(null, null, c -> exec(c,

@@ -332,9 +332,64 @@ class RelationshipsTest {
         UUID b = db.insertTenant();
         Model mb = canonicalModel(b);
         UUID ub = newUser(b);
+        // The relation is invisible under a's context: validate_relationship rejects it (relation_not_found,
+        // 23514) before RLS WITH CHECK would (42501). Either way the write is refused.
         assertThat(sqlState(() -> db.inTx("rbac_app", a, c ->
                 put(c, b, mb.folderType, "f", mb.folderEditor, mb.userType, ub.toString(), null))))
+                .isIn("23514", "42501");
+        db.inTx(null, null, c -> {
+            assertThat(count(c, "select count(*) from authz.relationships where tenant_id = ?", b)).isZero();
+            return null;
+        });
+    }
+
+    @Test
+    void rejectsUnknownRelationInsteadOfSkippingValidation() {
+        UUID t = db.insertTenant();
+        Model m = canonicalModel(t);
+        UUID u = newUser(t);
+        // Superuser bypasses RLS; the relation simply does not exist. Validation must fail closed.
+        assertThat(msg(() -> db.inTx(null, null, c ->
+                put(c, t, m.folderType, "f", Integer.MAX_VALUE, m.userType, u.toString(), null))))
+                .contains("relation_not_found");
+    }
+
+    @Test
+    void appAndAdminCannotForgeChangelogRows() {
+        UUID t = db.insertTenant();
+        Model m = canonicalModel(t);
+        String forge = "insert into authz.relationship_changes (seq, tenant_id, op, relationship_id, object_type_id, "
+                + "object_id, relation_id, subject_type_id, subject_id, actor_type, txid) "
+                + "values (9000000000000000000, ?, 'insert', 1, ?, 'f', ?, ?, 'x', 'system', '1'::xid8)";
+        for (String role : new String[] {"rbac_app", "rbac_admin"}) {
+            assertThat(sqlState(() -> db.inTx(role, t, c ->
+                    exec(c, forge, t, m.folderType, m.folderEditor, m.userType))))
+                    .as("insert as %s", role).isEqualTo("42501");
+            assertThat(sqlState(() -> db.inTx(role, t, c ->
+                    one(c, Long.class, "select nextval('authz.relationship_changes_seq_seq')"))))
+                    .as("nextval as %s", role).isEqualTo("42501");
+        }
+        db.inTx(null, null, c -> {
+            assertThat(count(c, "select count(*) from authz.relationship_changes where tenant_id = ?", t)).isZero();
+            return null;
+        });
+    }
+
+    @Test
+    void adminCannotRewriteChangelog() {
+        UUID t = db.insertTenant();
+        Model m = canonicalModel(t);
+        UUID u = newUser(t);
+        // rbac_admin's own tuple writes are still logged (through the definer trigger).
+        db.inTx("rbac_admin", null, c -> put(c, t, m.folderType, "f", m.folderEditor, m.userType, u.toString(), null));
+        assertThat(sqlState(() -> db.inTx("rbac_admin", null, c ->
+                exec(c, "delete from authz.relationship_changes where tenant_id = ?", t)))).isEqualTo("42501");
+        assertThat(sqlState(() -> db.inTx("rbac_admin", null, c ->
+                exec(c, "update authz.relationship_changes set op = 'delete' where tenant_id = ?", t))))
                 .isEqualTo("42501");
+        long rows = db.inTx("rbac_admin", null, c ->
+                count(c, "select count(*) from authz.relationship_changes where tenant_id = ? and op = 'insert'", t));
+        assertThat(rows).isEqualTo(1);
     }
 
     @Test

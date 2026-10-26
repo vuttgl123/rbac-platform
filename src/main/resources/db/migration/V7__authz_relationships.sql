@@ -3,8 +3,9 @@ SET LOCAL ROLE rbac_owner;
 -- V7: authz tuple store (Zanzibar-style relationships), its validation trigger, the partitioned
 -- changelog, and cascade-delete of tuples when a platform-owned entity is deleted.
 --
--- Trigger functions here run as the INVOKER on purpose: they must see only the caller's tenant
--- through RLS (rbac_app) and need no extra privileges.
+-- Validation and cascade trigger functions run as the INVOKER on purpose: they must see only the
+-- caller's tenant through RLS (rbac_app) and need no extra privileges. The changelog trigger is the
+-- exception: it is SECURITY DEFINER so that no application role needs (or has) INSERT on the log.
 
 -- authz.relationships ----------------------------------------------------------------------------
 -- One row = one fact "object#relation@subject[#subject_relation]", optionally conditional/expiring.
@@ -57,8 +58,9 @@ SELECT util.enable_tenant_rls('authz.relationships');
 
 -- authz.validate_relationship -----------------------------------------------------------------------
 -- Second line of defence (the service validates first). Raises check_violation with a token:
---   relation_is_permission, subject_type_not_allowed, condition_not_allowed, builtin_entity_missing.
--- A relation that is not visible/does not exist is left to the foreign key (23503) / RLS (42501).
+--   relation_not_found, relation_is_permission, subject_type_not_allowed, condition_not_allowed,
+--   builtin_entity_missing.
+-- A relation that is not visible to the caller or does not exist fails closed (relation_not_found).
 -- Platform-owned entities (user, group, application, tenant) are referenced by canonical lowercase
 -- UUID text; the entity must exist in the tuple's tenant. Wildcard subjects skip the existence check.
 CREATE FUNCTION authz.validate_relationship() RETURNS trigger
@@ -79,7 +81,8 @@ BEGIN
     FROM authz.relations r
     WHERE r.tenant_id = NEW.tenant_id AND r.id = NEW.relation_id;
     IF NOT FOUND THEN
-        RETURN NEW;
+        RAISE EXCEPTION 'relation_not_found: relation % does not exist in this tenant', NEW.relation_id
+            USING ERRCODE = 'check_violation';
     END IF;
 
     IF v_kind = 'permission' THEN
@@ -195,16 +198,17 @@ SELECT util.ensure_monthly_partitions('authz.relationship_changes', 3);
 CREATE INDEX relationship_changes_tenant_seq_idx ON authz.relationship_changes (tenant_id, seq);
 
 SELECT util.enable_tenant_rls('authz.relationship_changes');
--- The log trigger runs as the invoker, which needs nextval on the sequence.
-GRANT USAGE ON SEQUENCE authz.relationship_changes_seq_seq TO rbac_app, rbac_admin;
--- Append-only for the application role.
-REVOKE UPDATE, DELETE ON authz.relationship_changes FROM rbac_app;
+-- Read-only for both application roles: rows are written only by the SECURITY DEFINER log trigger
+-- (a forged row, e.g. a huge seq, would stall every cache invalidator), never updated or deleted;
+-- retention drops whole partitions (util.drop_partitions_older_than). No grant on the seq sequence.
+REVOKE INSERT, UPDATE, DELETE ON authz.relationship_changes FROM rbac_app, rbac_admin;
 
 -- authz.log_relationship_change ---------------------------------------------------------------------------
 -- UPDATE is logged as delete (old values) followed by insert (new values).
 -- Actor comes from the transaction-local settings app.actor_type / app.actor_id (NULL if unset/empty).
+-- SECURITY DEFINER (rbac_owner): safe because it is an AFTER trigger and OLD/NEW already passed RLS.
 CREATE FUNCTION authz.log_relationship_change() RETURNS trigger
-    LANGUAGE plpgsql
+    LANGUAGE plpgsql SECURITY DEFINER
     SET search_path = pg_catalog, extensions
 AS $$
 DECLARE
@@ -234,6 +238,8 @@ BEGIN
     RETURN NULL;
 END
 $$;
+
+REVOKE EXECUTE ON FUNCTION authz.log_relationship_change() FROM PUBLIC;
 
 CREATE TRIGGER relationships_log_change
     AFTER INSERT OR UPDATE OR DELETE ON authz.relationships

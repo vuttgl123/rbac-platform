@@ -220,17 +220,6 @@ class IdentitySchemaTest {
     }
 
     @Test
-    void sessionAndRefreshTokenApplicationIdHaveNoForeignKeyYet() {
-        db.inTx(null, null, c -> {
-            assertThat(count(c, "select count(*) from pg_constraint where contype = 'f' "
-                    + "and conrelid in ('identity.sessions'::regclass, 'identity.refresh_tokens'::regclass) "
-                    + "and exists (select 1 from pg_attribute a where a.attrelid = conrelid "
-                    + "  and a.attnum = any(conkey) and a.attname = 'application_id')")).isZero();
-            return null;
-        });
-    }
-
-    @Test
     void updatedAtIsMaintained() {
         UUID a = db.insertTenant();
         UUID u = db.insertUser(a, "upd@example.com");

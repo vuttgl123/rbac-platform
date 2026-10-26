@@ -71,6 +71,41 @@ class TenancySchemaTest {
     }
 
     @Test
+    void appRoleCanUpdateOnlyNameAndSettingsOfOwnTenant() {
+        UUID a = db.insertTenant();
+        String[] protectedColumns = {
+            "status = 'suspended'", "plan = 'enterprise'", "slug = 'hijack-" + rand() + "'",
+            "authz_model_revision = 9000000000000000000", "deleted_at = now()",
+        };
+        for (String set : protectedColumns) {
+            assertThat(sqlState(() -> db.inTx("rbac_app", a, c ->
+                    exec(c, "update tenancy.tenants set " + set + " where id = ?", a))))
+                    .as(set).isEqualTo("42501");
+        }
+        db.inTx("rbac_app", a, c -> {
+            assertThat(exec(c, "update tenancy.tenants set name = 'Renamed', settings = '{\"k\":1}'::jsonb "
+                    + "where id = ?", a)).isEqualTo(1);
+            return null;
+        });
+        db.inTx(null, null, c -> {
+            assertThat(one(c, String.class, "select concat_ws(' ', name, settings ->> 'k', status, plan, "
+                    + "slug like 'hijack-%', authz_model_revision >= 9000000000000000000, deleted_at is null) "
+                    + "from tenancy.tenants where id = ?", a))
+                    .isEqualTo("Renamed 1 active standard f f t");
+            return null;
+        });
+    }
+
+    @Test
+    void tenantsTableHasRlsEnabledAndForced() {
+        db.inTx(null, null, c -> {
+            assertThat(one(c, Boolean.class, "select relrowsecurity and relforcerowsecurity from pg_class "
+                    + "where oid = 'tenancy.tenants'::regclass")).isTrue();
+            return null;
+        });
+    }
+
+    @Test
     void appRoleCannotInsertTenant() {
         assertThat(sqlState(() -> db.inTx("rbac_app", null, c ->
                 exec(c, "insert into tenancy.tenants (slug, name) values ('app-" + rand() + "', 'x')"))))
@@ -89,11 +124,17 @@ class TenancySchemaTest {
     void adminRoleManagesAllTenants() {
         UUID a = db.insertTenant();
         db.inTx("rbac_admin", null, c -> {
-            assertThat(exec(c, "update tenancy.tenants set name='adm' where id=?", a)).isEqualTo(1);
-            assertThat(exec(c, "insert into tenancy.tenants (slug, name) values ('adm-" + rand() + "', 'x')"))
+            assertThat(exec(c, "update tenancy.tenants set name='adm', status = 'suspended' where id=?", a))
                     .isEqualTo(1);
             return null;
         });
+    }
+
+    @Test
+    void adminRoleCreatesTenantsOnlyThroughCreateTenant() {
+        assertThat(sqlState(() -> db.inTx("rbac_admin", null, c ->
+                exec(c, "insert into tenancy.tenants (slug, name) values ('adm-" + rand() + "', 'x')"))))
+                .isEqualTo("42501");
     }
 
     @Test

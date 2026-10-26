@@ -128,9 +128,10 @@ CREATE INDEX permission_rules_condition_idx ON authz.permission_rules (tenant_id
 SELECT util.enable_tenant_rls('authz.permission_rules');
 
 -- Model revision ---------------------------------------------------------------------
--- Runs as the invoker: rbac_app may update its own tenant row (tenants RLS), rbac_admin all.
+-- SECURITY DEFINER: rbac_app has no UPDATE privilege on tenants.authz_model_revision (V2). Safe
+-- because this is an AFTER trigger: NEW/OLD.tenant_id already passed the model table's RLS.
 CREATE FUNCTION authz.bump_model_revision() RETURNS trigger
-    LANGUAGE plpgsql
+    LANGUAGE plpgsql SECURITY DEFINER
     SET search_path = pg_catalog, extensions
 AS $$
 DECLARE
@@ -147,6 +148,8 @@ BEGIN
     RETURN NULL;
 END
 $$;
+
+REVOKE EXECUTE ON FUNCTION authz.bump_model_revision() FROM PUBLIC;
 
 CREATE TRIGGER resource_types_bump_revision
     AFTER INSERT OR UPDATE OR DELETE ON authz.resource_types

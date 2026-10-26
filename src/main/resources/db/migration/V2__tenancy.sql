@@ -23,8 +23,11 @@ CREATE TRIGGER tenants_set_updated_at
     FOR EACH ROW EXECUTE FUNCTION util.set_updated_at();
 
 -- tenants has no tenant_id column, so it gets its own policies instead of
--- util.enable_tenant_rls: every tenant is readable (slug lookup at login),
--- only the current tenant's row is updatable, and only rbac_admin can insert/delete.
+-- util.enable_tenant_rls: every tenant is readable (slug lookup at login), and rbac_app may
+-- update only the current tenant's row, and only its name and settings (column-level grant):
+-- status, plan, slug, authz_model_revision and deleted_at are operator/system-owned.
+-- Tenants are created only through tenancy.create_tenant (SECURITY DEFINER, V9); rbac_admin
+-- can update and delete them but not insert directly.
 ALTER TABLE tenancy.tenants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenancy.tenants FORCE ROW LEVEL SECURITY;
 
@@ -38,8 +41,9 @@ CREATE POLICY admin_all ON tenancy.tenants FOR ALL TO rbac_admin
 CREATE POLICY owner_all ON tenancy.tenants FOR ALL TO rbac_owner
     USING (true) WITH CHECK (true);
 
-GRANT SELECT, UPDATE ON tenancy.tenants TO rbac_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON tenancy.tenants TO rbac_admin;
+GRANT SELECT ON tenancy.tenants TO rbac_app;
+GRANT UPDATE (name, settings) ON tenancy.tenants TO rbac_app;
+GRANT SELECT, UPDATE, DELETE ON tenancy.tenants TO rbac_admin;
 
 CREATE TABLE tenancy.tenant_domains (
     tenant_id               uuid        NOT NULL REFERENCES tenancy.tenants (id) ON DELETE RESTRICT,

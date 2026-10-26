@@ -189,7 +189,7 @@ class TenantProvisioningTest {
                     select count(*) from authz.relations rel
                     join authz.resource_types rt on rt.tenant_id = rel.tenant_id and rt.id = rel.resource_type_id
                     where rel.tenant_id = ? and rt.key = 'tenant' and rel.key = 'operator'
-                      and rel.kind = 'role' and not rel.is_builtin
+                      and rel.kind = 'role' and rel.is_builtin
                     """, t)).isEqualTo(1);
             assertThat(count(c, """
                     select count(*) from authz.relation_subject_types s
@@ -210,6 +210,29 @@ class TenantProvisioningTest {
                     join authz.relations rel on rel.tenant_id = r.tenant_id and rel.id = r.relation_id
                     where r.tenant_id = ? and rel.key = 'admin' and r.subject_id = ?
                     """, t, u.toString())).isEqualTo(1);
+            return null;
+        });
+    }
+
+    @Test
+    void operatorRelationCannotBeDeletedRenamedOrWidenedByTheApp() {
+        UUID t = db.inTx(null, null, c -> one(c, UUID.class, "select id from tenancy.tenants where slug = 'platform'"));
+        int operator = db.inTx(null, null, c -> one(c, Integer.class,
+                "select rel.id from authz.relations rel join authz.resource_types rt "
+                + "on rt.tenant_id = rel.tenant_id and rt.id = rel.resource_type_id "
+                + "where rel.tenant_id = ? and rt.key = 'tenant' and rel.key = 'operator'", t));
+        assertThat(errorMessage(() -> db.inTx("rbac_app", t, c -> exec(c,
+                "update authz.relations set key = 'op2' where tenant_id = ? and id = ?", t, operator))))
+                .contains("builtin_immutable");
+        assertThat(errorMessage(() -> db.inTx("rbac_app", t, c -> exec(c,
+                "delete from authz.relations where tenant_id = ? and id = ?", t, operator))))
+                .contains("builtin_immutable");
+        assertThat(errorMessage(() -> db.inTx("rbac_app", t, c -> exec(c,
+                "update authz.relation_subject_types set allow_wildcard = true where tenant_id = ? and relation_id = ?",
+                t, operator)))).contains("builtin_immutable");
+        db.inTx(null, null, c -> {
+            assertThat(count(c, "select count(*) from authz.relations where tenant_id = ? and id = ? "
+                    + "and key = 'operator'", t, operator)).isEqualTo(1);
             return null;
         });
     }

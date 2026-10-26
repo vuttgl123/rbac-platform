@@ -148,7 +148,7 @@ class PartitionMaintenanceTest {
             return null;
         });
 
-        assertThat(drop("1 month")).isEqualTo(1);
+        assertThat(drop("90 days")).isEqualTo(1);
 
         db.inTx(null, null, c -> {
             assertThat(exists(c, t + "_p199001")).isTrue();
@@ -164,9 +164,26 @@ class PartitionMaintenanceTest {
             exec(c, "insert into " + parent() + " (ts, v) values (timestamptz '2001-01-01 00:00:00+00', 1)");
             return null;
         });
-        assertThat(drop("0 seconds")).isZero();
+        assertThat(drop("90 days")).isZero();
         db.inTx(null, null, c -> {
             assertThat(count(c, "select count(*) from " + parent() + "_default")).isEqualTo(1);
+            return null;
+        });
+    }
+
+    @Test
+    void refusesToKeepLessThanNinetyDays() {
+        db.inTx(null, null, c -> {
+            assertThat(one(c, Boolean.class, "select util.create_monthly_partition(?::regclass, "
+                    + "(date_trunc('month', now() at time zone 'UTC') - interval '2 months')::date)", parent()))
+                    .isTrue();
+            return null;
+        });
+        for (String keep : new String[] {"0 seconds", "1 month", "89 days"}) {
+            assertThat(sqlState(() -> drop(keep))).as(keep).isEqualTo("22023");
+        }
+        db.inTx(null, null, c -> {
+            assertThat(exists(c, t + "_p" + yyyymm(c, -2))).isTrue();
             return null;
         });
     }

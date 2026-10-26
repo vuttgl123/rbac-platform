@@ -176,6 +176,7 @@ $$;
 
 -- util.drop_partitions_older_than: drops partitions whose upper bound is <= now() - p_keep.
 -- Partitions are identified by their bounds (never by name) and DEFAULT is never dropped.
+-- p_keep has a 90-day floor so a retention call can never wipe recent audit or changelog history.
 -- Returns how many were dropped.
 CREATE FUNCTION util.drop_partitions_older_than(p_parent regclass, p_keep interval) RETURNS int
     LANGUAGE plpgsql SECURITY DEFINER
@@ -190,8 +191,12 @@ DECLARE
     v_child   record;
     v_dropped int := 0;
 BEGIN
-    IF p_parent IS NULL OR p_keep IS NULL OR p_keep < interval '0' THEN
-        RAISE EXCEPTION 'invalid_argument: p_parent and a non-negative p_keep are required'
+    IF p_parent IS NULL OR p_keep IS NULL THEN
+        RAISE EXCEPTION 'invalid_argument: p_parent and p_keep are required'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_keep < interval '90 days' THEN
+        RAISE EXCEPTION 'retention_too_short: p_keep must be at least 90 days'
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
 

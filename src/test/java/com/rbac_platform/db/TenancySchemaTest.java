@@ -75,7 +75,7 @@ class TenancySchemaTest {
         UUID a = db.insertTenant();
         String[] protectedColumns = {
             "status = 'suspended'", "plan = 'enterprise'", "slug = 'hijack-" + rand() + "'",
-            "authz_model_revision = 9000000000000000000", "deleted_at = now()",
+            "authz_model_revision = 9000000000000000000", "deleted_at = now()", "mfa_min = 'required'",
         };
         for (String set : protectedColumns) {
             assertThat(sqlState(() -> db.inTx("rbac_app", a, c ->
@@ -92,6 +92,42 @@ class TenancySchemaTest {
                     + "slug like 'hijack-%', authz_model_revision >= 9000000000000000000, deleted_at is null) "
                     + "from tenancy.tenants where id = ?", a))
                     .isEqualTo("Renamed 1 active standard f f t");
+            return null;
+        });
+    }
+
+    @Test
+    void settingsMfaCannotDropBelowOperatorFloor() {
+        UUID a = db.insertTenant();
+        db.inTx("rbac_admin", null, c -> exec(c, "update tenancy.tenants "
+                + "set mfa_min = 'optional', settings = '{\"mfa\":{\"required\":\"optional\"}}' where id = ?", a));
+        for (String mfa : new String[] {"{}", "{\"mfa\":{\"required\":\"off\"}}"}) {
+            assertThat(sqlState(() -> db.inTx("rbac_app", a, c -> exec(c,
+                    "update tenancy.tenants set settings = ?::jsonb where id = ?", mfa, a))))
+                    .as(mfa).isEqualTo("23514");
+        }
+        for (String level : new String[] {"optional", "required"}) {
+            db.inTx("rbac_app", a, c -> exec(c,
+                    "update tenancy.tenants set settings = jsonb_build_object('mfa', jsonb_build_object('required', ?::text)) "
+                    + "where id = ?", level, a));
+        }
+        // The floor cannot be raised over the tenant's current setting either, and must be a known level.
+        db.inTx("rbac_app", a, c -> exec(c,
+                "update tenancy.tenants set settings = '{\"mfa\":{\"required\":\"optional\"}}' where id = ?", a));
+        assertThat(sqlState(() -> db.inTx("rbac_admin", null, c ->
+                exec(c, "update tenancy.tenants set mfa_min = 'required' where id = ?", a)))).isEqualTo("23514");
+        assertThat(sqlState(() -> db.inTx("rbac_admin", null, c ->
+                exec(c, "update tenancy.tenants set mfa_min = 'sometimes' where id = ?", a)))).isEqualTo("23514");
+    }
+
+    @Test
+    void settingsMfaMustBeAKnownLevel() {
+        UUID a = db.insertTenant();
+        assertThat(sqlState(() -> db.inTx("rbac_app", a, c -> exec(c,
+                "update tenancy.tenants set settings = '{\"mfa\":{\"required\":\"yes\"}}' where id = ?", a))))
+                .isEqualTo("23514");
+        db.inTx(null, null, c -> {
+            assertThat(one(c, String.class, "select mfa_min from tenancy.tenants where id = ?", a)).isEqualTo("off");
             return null;
         });
     }

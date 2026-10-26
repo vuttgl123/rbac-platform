@@ -2,13 +2,15 @@ SET LOCAL ROLE rbac_owner;
 
 -- V10: the system tenant `platform` and its first operator account (spec 5.1).
 -- The operator email comes from the Flyway placeholder platform_operator_email (environment variable
--- PLATFORM_OPERATOR_EMAIL), never hardcoded. It is read exactly once, dollar-quoted so no quote in it
--- can break out of the literal, and validated before anything is written: once applied this file is
+-- PLATFORM_OPERATOR_EMAIL), never hardcoded. It is read exactly once, dollar-quoted so a quote in it
+-- cannot break out of the literal (Flyway substitutes text before parsing, so a value containing `$e$`
+-- still could: the deployer sets it), and validated before anything is written: once applied this file is
 -- frozen, so an empty or malformed value must fail the migration instead of seeding a bad account.
 -- The account is created 'invited' and has no password and no invitation token; the service issues
 -- the invitation later.
 -- Operator rights are the `operator` role on the platform tenant's builtin `tenant` object. The relation
 -- is builtin (inserted here as rbac_owner), so no tenant role can delete, rename or widen it.
+-- MFA is required for the platform tenant and pinned there by the operator-owned mfa_min floor (V2).
 -- Flyway does not substitute a placeholder written directly after a `$`, hence the space after the
 -- opening $e$ tag, which substr() removes again.
 DO $do$
@@ -45,7 +47,7 @@ BEGIN
     VALUES (v_tenant_id, v_tenant_type, v_tenant_id::text, v_operator, v_user_type, v_operator_id::text);
 
     UPDATE tenancy.tenants
-    SET settings = settings || '{"mfa":{"required":"required"}}'
+    SET settings = settings || '{"mfa":{"required":"required"}}', mfa_min = 'required'
     WHERE id = v_tenant_id;
 END
 $do$;

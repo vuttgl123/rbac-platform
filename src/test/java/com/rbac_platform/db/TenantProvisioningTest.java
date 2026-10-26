@@ -177,8 +177,9 @@ class TenantProvisioningTest {
         db.inTx(null, null, c -> {
             UUID t = one(c, UUID.class, "select id from tenancy.tenants where slug = 'platform'");
             assertThat(t).isNotNull();
-            assertThat(one(c, String.class, "select settings -> 'mfa' ->> 'required' from tenancy.tenants where id = ?", t))
-                    .isEqualTo("required");
+            assertThat(one(c, String.class,
+                    "select concat_ws(' ', settings -> 'mfa' ->> 'required', mfa_min) from tenancy.tenants where id = ?", t))
+                    .isEqualTo("required required");
             UUID u = one(c, UUID.class,
                     "select id from identity.users where tenant_id = ? and email = 'operator@platform.test' "
                             + "and status = 'invited'", t);

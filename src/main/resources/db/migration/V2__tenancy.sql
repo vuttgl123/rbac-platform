@@ -9,13 +9,22 @@ CREATE TABLE tenancy.tenants (
     status               text        NOT NULL DEFAULT 'active',
     plan                 text        NOT NULL DEFAULT 'standard',
     settings             jsonb       NOT NULL DEFAULT '{}',
+    mfa_min              text        NOT NULL DEFAULT 'off',
     authz_model_revision bigint      NOT NULL DEFAULT 0,
     created_at           timestamptz NOT NULL DEFAULT now(),
     updated_at           timestamptz NOT NULL DEFAULT now(),
     deleted_at           timestamptz,
     CONSTRAINT tenants_slug_key UNIQUE (slug),
     CONSTRAINT tenants_slug_format CHECK (slug ~ '^[a-z0-9][a-z0-9-]{1,62}$'),
-    CONSTRAINT tenants_status_check CHECK (status IN ('active', 'suspended', 'deleted'))
+    CONSTRAINT tenants_status_check CHECK (status IN ('active', 'suspended', 'deleted')),
+    -- settings.mfa.required is tenant-managed (absent = 'off'); mfa_min is the operator-owned floor
+    -- the tenant's own setting may never drop below (the platform tenant's is 'required', V10).
+    CONSTRAINT tenants_mfa_min_check CHECK (mfa_min IN ('off', 'optional', 'required')),
+    CONSTRAINT tenants_settings_mfa_check
+        CHECK (coalesce(settings #>> '{mfa,required}', 'off') IN ('off', 'optional', 'required')),
+    CONSTRAINT tenants_mfa_floor_check
+        CHECK (array_position(ARRAY['off', 'optional', 'required'], coalesce(settings #>> '{mfa,required}', 'off'))
+               >= array_position(ARRAY['off', 'optional', 'required'], mfa_min))
 );
 
 CREATE TRIGGER tenants_set_updated_at
@@ -25,7 +34,7 @@ CREATE TRIGGER tenants_set_updated_at
 -- tenants has no tenant_id column, so it gets its own policies instead of
 -- util.enable_tenant_rls: every tenant is readable (slug lookup at login), and rbac_app may
 -- update only the current tenant's row, and only its name and settings (column-level grant):
--- status, plan, slug, authz_model_revision and deleted_at are operator/system-owned.
+-- status, plan, slug, mfa_min, authz_model_revision and deleted_at are operator/system-owned.
 -- Tenants are created only through tenancy.create_tenant (SECURITY DEFINER, V9); rbac_admin
 -- can update and delete them but not insert directly.
 ALTER TABLE tenancy.tenants ENABLE ROW LEVEL SECURITY;

@@ -168,7 +168,9 @@ CREATE TRIGGER conditions_bump_revision
     FOR EACH ROW EXECUTE FUNCTION authz.bump_model_revision();
 
 -- Builtin protection -------------------------------------------------------------------
--- Builtin rows cannot be deleted, renamed (key), or demoted (is_builtin true -> false).
+-- Builtin rows cannot be deleted, renamed (key), or demoted (is_builtin true -> false), and only
+-- rbac_owner (the seed and V10, which run as rbac_owner) may create a builtin row or promote one
+-- (is_builtin false -> true): otherwise a tenant could mint rows the platform trusts as builtin.
 CREATE FUNCTION authz.protect_builtin() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path = pg_catalog, extensions
@@ -182,6 +184,14 @@ BEGIN
         RETURN OLD;
     END IF;
 
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.is_builtin AND current_user <> 'rbac_owner' THEN
+            RAISE EXCEPTION 'builtin_immutable: only the platform may create builtin % "%"', TG_TABLE_NAME, NEW.key
+                USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NEW;
+    END IF;
+
     IF OLD.is_builtin AND NEW.key IS DISTINCT FROM OLD.key THEN
         RAISE EXCEPTION 'builtin_immutable: cannot rename builtin % "%"', TG_TABLE_NAME, OLD.key
             USING ERRCODE = 'check_violation';
@@ -190,22 +200,81 @@ BEGIN
         RAISE EXCEPTION 'builtin_immutable: cannot demote builtin % "%"', TG_TABLE_NAME, OLD.key
             USING ERRCODE = 'check_violation';
     END IF;
+    IF NOT OLD.is_builtin AND NEW.is_builtin AND current_user <> 'rbac_owner' THEN
+        RAISE EXCEPTION 'builtin_immutable: only the platform may promote % "%" to builtin', TG_TABLE_NAME, OLD.key
+            USING ERRCODE = 'check_violation';
+    END IF;
     RETURN NEW;
 END
 $$;
 
+CREATE TRIGGER resource_types_protect_builtin_insert
+    BEFORE INSERT ON authz.resource_types
+    FOR EACH ROW WHEN (NEW.is_builtin) EXECUTE FUNCTION authz.protect_builtin();
 CREATE TRIGGER resource_types_protect_builtin_delete
     BEFORE DELETE ON authz.resource_types
     FOR EACH ROW EXECUTE FUNCTION authz.protect_builtin();
 CREATE TRIGGER resource_types_protect_builtin_update
     BEFORE UPDATE OF key, is_builtin ON authz.resource_types
     FOR EACH ROW EXECUTE FUNCTION authz.protect_builtin();
+CREATE TRIGGER relations_protect_builtin_insert
+    BEFORE INSERT ON authz.relations
+    FOR EACH ROW WHEN (NEW.is_builtin) EXECUTE FUNCTION authz.protect_builtin();
 CREATE TRIGGER relations_protect_builtin_delete
     BEFORE DELETE ON authz.relations
     FOR EACH ROW EXECUTE FUNCTION authz.protect_builtin();
 CREATE TRIGGER relations_protect_builtin_update
     BEFORE UPDATE OF key, is_builtin ON authz.relations
     FOR EACH ROW EXECUTE FUNCTION authz.protect_builtin();
+
+-- A relation's kind and resource type are fixed at creation, for every relation: reshaping one in
+-- place (e.g. a role into a permission) would silently reinterpret every tuple and rule using it.
+-- To change the shape, delete the relation and create a new one.
+CREATE FUNCTION authz.protect_relation_shape() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, extensions
+AS $$
+BEGIN
+    IF NEW.kind IS DISTINCT FROM OLD.kind OR NEW.resource_type_id IS DISTINCT FROM OLD.resource_type_id THEN
+        RAISE EXCEPTION 'relation_shape_immutable: kind and resource type of relation "%" cannot change', OLD.key
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER relations_protect_shape
+    BEFORE UPDATE OF kind, resource_type_id ON authz.relations
+    FOR EACH ROW EXECUTE FUNCTION authz.protect_relation_shape();
+
+-- Who may hold a builtin relation (e.g. tenant.admin) is part of the platform model: only rbac_owner
+-- may insert, change or delete those rows. Checks the old and the new relation of the row.
+-- Invoker on purpose: under rbac_app the lookup sees only the caller's tenant, and a row of another
+-- tenant is rejected by RLS anyway.
+CREATE FUNCTION authz.protect_builtin_subject_types() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, extensions
+AS $$
+BEGIN
+    IF current_user = 'rbac_owner' THEN
+        RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+    END IF;
+    IF (TG_OP IN ('UPDATE', 'DELETE') AND EXISTS (
+            SELECT 1 FROM authz.relations r
+            WHERE r.tenant_id = OLD.tenant_id AND r.id = OLD.relation_id AND r.is_builtin))
+       OR (TG_OP IN ('INSERT', 'UPDATE') AND EXISTS (
+            SELECT 1 FROM authz.relations r
+            WHERE r.tenant_id = NEW.tenant_id AND r.id = NEW.relation_id AND r.is_builtin)) THEN
+        RAISE EXCEPTION 'builtin_immutable: allowed subject types of a builtin relation cannot change'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END
+$$;
+
+CREATE TRIGGER relation_subject_types_protect_builtin
+    BEFORE INSERT OR UPDATE OR DELETE ON authz.relation_subject_types
+    FOR EACH ROW EXECUTE FUNCTION authz.protect_builtin_subject_types();
 
 -- Builtin seeding ------------------------------------------------------------------------
 -- tenant (roles admin, member), user, group (relationship member), application.

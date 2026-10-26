@@ -136,6 +136,121 @@ class AuthzModelTest {
         });
     }
 
+    private static int builtinRelation(Connection c, UUID t, String typeKey, String key) {
+        return one(c, Integer.class, "select r.id from authz.relations r join authz.resource_types rt "
+                + "on rt.tenant_id = r.tenant_id and rt.id = r.resource_type_id "
+                + "where r.tenant_id = ? and rt.key = ? and r.key = ?", t, typeKey, key);
+    }
+
+    @Test
+    void appRoleCannotTurnBuiltinAdminIntoDerivedPermission() {
+        UUID t = db.insertTenant();
+        int admin = db.inTx(null, null, c -> builtinRelation(c, t, "tenant", "admin"));
+        int tenantType = db.inTx(null, null, c -> one(c, Integer.class,
+                "select id from authz.resource_types where tenant_id = ? and key = 'tenant'", t));
+        // Verified escalation: admin becomes a permission, then "admin <= computed member".
+        assertThat(errorMessage(() -> db.inTx("rbac_app", t, c -> exec(c,
+                "update authz.relations set kind = 'permission' where tenant_id = ? and id = ?", t, admin))))
+                .contains("relation_shape_immutable");
+        assertThat(sqlState(() -> db.inTx("rbac_app", t, c -> exec(c,
+                "insert into authz.permission_rules (tenant_id, resource_type_id, permission_id, kind, target_key) "
+                + "values (?, ?, ?, 'computed', 'member')", t, tenantType, admin))))
+                .isEqualTo("23503");
+        db.inTx(null, null, c -> {
+            assertThat(one(c, String.class, "select kind from authz.relations where tenant_id = ? and id = ?", t, admin))
+                    .isEqualTo("role");
+            assertThat(count(c, "select count(*) from authz.permission_rules where tenant_id = ?", t)).isZero();
+            return null;
+        });
+    }
+
+    @Test
+    void relationKindAndResourceTypeAreImmutableForEveryRelation() {
+        UUID t = db.insertTenant();
+        int folder = insertType(t, "folder");
+        int document = insertType(t, "document");
+        int editor = insertRelation(t, folder, "editor", "role");
+        for (String role : new String[] {"rbac_app", null}) {
+            assertThat(errorMessage(() -> db.inTx(role, t, c -> exec(c,
+                    "update authz.relations set kind = 'relationship' where tenant_id = ? and id = ?", t, editor))))
+                    .as("kind as %s", role).contains("relation_shape_immutable");
+            assertThat(errorMessage(() -> db.inTx(role, t, c -> exec(c,
+                    "update authz.relations set resource_type_id = ? where tenant_id = ? and id = ?",
+                    document, t, editor))))
+                    .as("resource_type_id as %s", role).contains("relation_shape_immutable");
+        }
+        // Unchanged shape columns in the SET list are fine.
+        db.inTx("rbac_app", t, c -> exec(c,
+                "update authz.relations set kind = 'role', name = 'Editor' where tenant_id = ? and id = ?", t, editor));
+    }
+
+    @Test
+    void onlyOwnerCanCreateOrPromoteBuiltins() {
+        UUID t = db.insertTenant();
+        int folder = insertType(t, "folder");
+        int editor = insertRelation(t, folder, "editor", "role");
+        for (String role : new String[] {"rbac_app", "rbac_admin"}) {
+            assertThat(errorMessage(() -> db.inTx(role, t, c -> exec(c,
+                    "insert into authz.resource_types (tenant_id, key, name, is_builtin) values (?, 'fake', 'x', true)",
+                    t)))).as("type insert as %s", role).contains("builtin_immutable");
+            assertThat(errorMessage(() -> db.inTx(role, t, c -> exec(c,
+                    "insert into authz.relations (tenant_id, resource_type_id, key, kind, name, is_builtin) "
+                    + "values (?, ?, 'fake', 'role', 'x', true)", t, folder))))
+                    .as("relation insert as %s", role).contains("builtin_immutable");
+            assertThat(errorMessage(() -> db.inTx(role, t, c -> exec(c,
+                    "update authz.resource_types set is_builtin = true where tenant_id = ? and id = ?", t, folder))))
+                    .as("type promote as %s", role).contains("builtin_immutable");
+            assertThat(errorMessage(() -> db.inTx(role, t, c -> exec(c,
+                    "update authz.relations set is_builtin = true where tenant_id = ? and id = ?", t, editor))))
+                    .as("relation promote as %s", role).contains("builtin_immutable");
+        }
+        // rbac_owner (what the seed runs as) may.
+        db.inTx("rbac_owner", null, c -> exec(c,
+                "insert into authz.relations (tenant_id, resource_type_id, key, kind, name, is_builtin) "
+                + "values (?, ?, 'owned', 'role', 'x', true)", t, folder));
+    }
+
+    @Test
+    void builtinRelationSubjectTypesAreImmutable() {
+        UUID t = db.insertTenant();
+        int folder = insertType(t, "folder");
+        int customRole = insertRelation(t, folder, "editor", "role");
+        int[] ids = db.inTx(null, null, c -> new int[] {
+            builtinRelation(c, t, "tenant", "admin"),
+            one(c, Integer.class, "select id from authz.resource_types where tenant_id = ? and key = 'user'", t),
+        });
+        int admin = ids[0];
+        int user = ids[1];
+        for (String role : new String[] {"rbac_app", "rbac_admin"}) {
+            // user:* on tenant.admin
+            assertThat(errorMessage(() -> db.inTx(role, t, c -> exec(c,
+                    "update authz.relation_subject_types set allow_wildcard = true "
+                    + "where tenant_id = ? and relation_id = ? and subject_type_id = ?", t, admin, user))))
+                    .as("wildcard as %s", role).contains("builtin_immutable");
+            assertThat(errorMessage(() -> db.inTx(role, t, c -> exec(c,
+                    "insert into authz.relation_subject_types (tenant_id, relation_id, subject_type_id) "
+                    + "values (?, ?, ?)", t, admin, folder))))
+                    .as("insert as %s", role).contains("builtin_immutable");
+            assertThat(errorMessage(() -> db.inTx(role, t, c -> exec(c,
+                    "delete from authz.relation_subject_types where tenant_id = ? and relation_id = ?", t, admin))))
+                    .as("delete as %s", role).contains("builtin_immutable");
+        }
+        // Moving a custom relation's row onto a builtin relation is rejected too.
+        int rst = db.inTx("rbac_app", t, c -> one(c, Integer.class,
+                "insert into authz.relation_subject_types (tenant_id, relation_id, subject_type_id) "
+                + "values (?, ?, ?) returning id", t, customRole, user));
+        assertThat(errorMessage(() -> db.inTx("rbac_app", t, c -> exec(c,
+                "update authz.relation_subject_types set relation_id = ? where tenant_id = ? and id = ?",
+                admin, t, rst)))).contains("builtin_immutable");
+        db.inTx(null, null, c -> {
+            assertThat(subjectTypes(c, t, "tenant", "admin"))
+                    .containsExactlyInAnyOrder("user", "group#member", "application");
+            assertThat(count(c, "select count(*) from authz.relation_subject_types where tenant_id = ? "
+                    + "and relation_id = ? and allow_wildcard", t, admin)).isZero();
+            return null;
+        });
+    }
+
     @Test
     void customRowsAreNotProtected() {
         UUID t = db.insertTenant();

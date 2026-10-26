@@ -59,6 +59,8 @@ public final class MigratedDatabase {
             try (Connection c = ds.getConnection(); Statement s = c.createStatement()) {
                 s.execute("CREATE ROLE anon NOLOGIN");
                 s.execute("CREATE ROLE authenticated NOLOGIN");
+                s.execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') "
+                        + "THEN CREATE ROLE service_role NOLOGIN; END IF; END $$");
             }
             Flyway.configure()
                     .dataSource(ds)

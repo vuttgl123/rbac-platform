@@ -12,13 +12,14 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * Supabase's Data API connects as anon / authenticated. Nothing the platform owns may be reachable by them,
- * and the application roles must not be able to run operator-only functions.
+ * Supabase's Data API connects as anon / authenticated / service_role. Nothing the platform owns (nor the Flyway
+ * history schema) may be reachable by them, and the application roles must not be able to run operator-only
+ * functions.
  */
 class SupabaseExposureTest {
 
     private static final String SCHEMAS = "'tenancy','identity','apps','authz','audit','util'";
-    private static final List<String> API_ROLES = List.of("anon", "authenticated");
+    private static final List<String> API_ROLES = List.of("anon", "authenticated", "service_role");
 
     private final MigratedDatabase db = MigratedDatabase.get();
 
@@ -33,7 +34,7 @@ class SupabaseExposureTest {
     }
 
     @Test
-    void anonAndAuthenticatedCannotTouchAnyPlatformObject() {
+    void apiRolesCannotTouchAnyPlatformObject() {
         db.inTx(null, null, c -> {
             // Tables, partitions, views, materialized views, sequences.
             String relations = "select c.oid::regclass::text || ':' || c.relkind::text from pg_class c "
@@ -68,7 +69,21 @@ class SupabaseExposureTest {
     }
 
     @Test
-    void anonAndAuthenticatedCannotExecuteAnyPlatformFunction() {
+    void apiRolesExistAndCannotUseFlywaySchema() {
+        db.inTx(null, null, c -> {
+            assertThat(count(c, "select count(*) from pg_namespace where nspname = 'flyway'")).isEqualTo(1);
+            for (String role : API_ROLES) {
+                assertThat(count(c, "select count(*) from pg_roles where rolname = ?", role)).as(role).isEqualTo(1);
+                assertThat(count(c, "select count(*) from pg_namespace n where n.nspname = 'flyway' "
+                        + "and has_schema_privilege(?, n.oid, 'USAGE,CREATE')", role))
+                        .as("%s USAGE/CREATE on schema flyway", role).isZero();
+            }
+            return null;
+        });
+    }
+
+    @Test
+    void apiRolesCannotExecuteAnyPlatformFunction() {
         db.inTx(null, null, c -> {
             List<String> definers = strings(c, "select p.oid::regprocedure::text from pg_proc p "
                     + "join pg_namespace n on n.oid = p.pronamespace "

@@ -53,7 +53,7 @@ DO $$
 DECLARE
     r text;
 BEGIN
-    FOREACH r IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+    FOREACH r IN ARRAY ARRAY['anon', 'authenticated', 'service_role'] LOOP
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
             EXECUTE format(
                 'REVOKE ALL ON SCHEMA tenancy, identity, apps, authz, audit, util FROM %I', r);

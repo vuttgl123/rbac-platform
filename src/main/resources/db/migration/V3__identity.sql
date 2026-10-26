@@ -43,6 +43,38 @@ CREATE TRIGGER users_set_updated_at
     FOR EACH ROW EXECUTE FUNCTION util.set_updated_at();
 SELECT util.enable_tenant_rls('identity.users');
 
+-- Login lookups by email / username within the current tenant (app.tenant_id); no context, no rows.
+-- SECURITY DEFINER with extensions on the search_path: the comparison is always citext (case-
+-- insensitive) whatever the caller's search_path, and it runs under rbac_owner's owner_all policy, so
+-- citext's non-LEAKPROOF = is not held behind an RLS qual and the unique (tenant_id, email|username)
+-- index is used. Soft-deleted users are never returned.
+CREATE FUNCTION identity.find_user_by_email(p_email text) RETURNS SETOF identity.users
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, extensions
+AS $$
+    SELECT u.*
+    FROM identity.users u
+    WHERE u.tenant_id = util.current_tenant_id()
+      AND u.deleted_at IS NULL
+      AND u.email = p_email::extensions.citext
+$$;
+
+CREATE FUNCTION identity.find_user_by_username(p_username text) RETURNS SETOF identity.users
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, extensions
+AS $$
+    SELECT u.*
+    FROM identity.users u
+    WHERE u.tenant_id = util.current_tenant_id()
+      AND u.deleted_at IS NULL
+      AND u.username = p_username::extensions.citext
+$$;
+
+REVOKE EXECUTE ON FUNCTION identity.find_user_by_email(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION identity.find_user_by_username(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION identity.find_user_by_email(text) TO rbac_app, rbac_admin;
+GRANT EXECUTE ON FUNCTION identity.find_user_by_username(text) TO rbac_app, rbac_admin;
+
 -- One row per user, kept apart so a hash is never read together with the user row.
 CREATE TABLE identity.password_credentials (
     tenant_id     uuid        NOT NULL REFERENCES tenancy.tenants (id) ON DELETE RESTRICT,
@@ -181,6 +213,9 @@ CREATE TABLE identity.sessions (
     FOREIGN KEY (tenant_id, user_id) REFERENCES identity.users (tenant_id, id) ON DELETE CASCADE
 );
 CREATE INDEX sessions_active_user_idx ON identity.sessions (tenant_id, user_id) WHERE revoked_at IS NULL;
+-- Full index for the ON DELETE CASCADE from users (and tenant hard-delete), which must also reach
+-- revoked sessions; the partial index above cannot serve it.
+CREATE INDEX sessions_user_idx ON identity.sessions (tenant_id, user_id);
 SELECT util.enable_tenant_rls('identity.sessions');
 
 CREATE TABLE identity.refresh_tokens (

@@ -30,6 +30,11 @@ CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA extensions;
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 GRANT USAGE ON SCHEMA extensions TO rbac_owner, rbac_app, rbac_admin;
 
+-- Sessions that log in as the application roles resolve extension types and operators (citext's
+-- case-insensitive =) the same way in every environment, without schema-qualifying each one.
+ALTER ROLE rbac_app SET search_path = "$user", extensions;
+ALTER ROLE rbac_admin SET search_path = "$user", extensions;
+
 -- From here on everything is created by rbac_owner ------------------------------
 SET LOCAL ROLE rbac_owner;
 

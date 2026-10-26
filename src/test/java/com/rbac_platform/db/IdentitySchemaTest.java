@@ -243,4 +243,80 @@ class IdentitySchemaTest {
             return null;
         });
     }
+
+    @Test
+    void findUserByEmailIgnoresCaseAndStaysInTenant() {
+        UUID a = db.insertTenant();
+        UUID b = db.insertTenant();
+        String local = "find-" + rand();
+        UUID mine = db.insertUser(a, local + ".Mixed@Example.com");
+        UUID gone = db.insertUser(a, "gone-" + local + "@example.com");
+        db.inTx(null, null, c -> exec(c,
+                "update identity.users set deleted_at = now() where tenant_id = ? and id = ?", a, gone));
+        db.insertUser(b, "theirs-" + local + "@example.com");
+        String find = "select id from identity.find_user_by_email(?)";
+        for (String role : new String[] {"rbac_app", "rbac_admin"}) {
+            db.inTx(role, a, c -> {
+                assertThat(one(c, UUID.class, find, local.toUpperCase() + ".mixed@EXAMPLE.COM")).as(role).isEqualTo(mine);
+                assertThat(one(c, UUID.class, find, "theirs-" + local + "@example.com")).as(role).isNull();
+                assertThat(one(c, UUID.class, find, "gone-" + local + "@example.com")).as(role).isNull();
+                return null;
+            });
+        }
+        // No tenant context: nothing, even for an exact match.
+        assertThat(db.<UUID>inTx("rbac_app", null, c -> one(c, UUID.class, find, local + ".Mixed@Example.com")))
+                .isNull();
+    }
+
+    @Test
+    void findUserByUsernameIgnoresCaseAndStaysInTenant() {
+        UUID a = db.insertTenant();
+        UUID b = db.insertTenant();
+        String name = "Login-" + rand();
+        UUID mine = db.inTx(null, null, c -> one(c, UUID.class,
+                "insert into identity.users (tenant_id, username) values (?, ?) returning id", a, name));
+        db.inTx(null, null, c -> exec(c,
+                "insert into identity.users (tenant_id, username) values (?, ?)", b, "other-" + name));
+        String find = "select id from identity.find_user_by_username(?)";
+        db.inTx("rbac_app", a, c -> {
+            assertThat(one(c, UUID.class, find, name.toLowerCase())).isEqualTo(mine);
+            assertThat(one(c, UUID.class, find, "other-" + name)).isNull();
+            return null;
+        });
+        assertThat(db.<UUID>inTx("rbac_app", null, c -> one(c, UUID.class, find, name))).isNull();
+    }
+
+    @Test
+    void userLookupFunctionsAreGrantedOnlyToPlatformRoles() {
+        db.inTx(null, null, c -> {
+            for (String fn : new String[] {"identity.find_user_by_email(text)", "identity.find_user_by_username(text)"}) {
+                assertThat(one(c, Boolean.class, "select has_function_privilege('rbac_app', ?, 'EXECUTE') "
+                        + "and has_function_privilege('rbac_admin', ?, 'EXECUTE') "
+                        + "and not has_function_privilege('anon', ?, 'EXECUTE')", fn, fn, fn)).as(fn).isTrue();
+            }
+            return null;
+        });
+    }
+
+    @Test
+    void loginRolesResolveExtensionsOnTheirSearchPath() {
+        db.inTx(null, null, c -> {
+            for (String role : new String[] {"rbac_app", "rbac_admin"}) {
+                assertThat(one(c, String.class, "select array_to_string(s.setconfig, ',') from pg_db_role_setting s "
+                        + "where s.setrole = ?::regrole and s.setdatabase = 0", role))
+                        .as(role).isEqualTo("search_path=\"$user\", extensions");
+            }
+            return null;
+        });
+    }
+
+    @Test
+    void sessionsHaveFullUserIndexForCascades() {
+        db.inTx(null, null, c -> {
+            assertThat(one(c, String.class, "select indexdef from pg_indexes "
+                    + "where schemaname = 'identity' and indexname = 'sessions_user_idx'"))
+                    .isEqualTo("CREATE INDEX sessions_user_idx ON identity.sessions USING btree (tenant_id, user_id)");
+            return null;
+        });
+    }
 }

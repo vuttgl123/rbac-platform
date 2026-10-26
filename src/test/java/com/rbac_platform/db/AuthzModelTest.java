@@ -481,6 +481,45 @@ class AuthzModelTest {
     }
 
     @Test
+    void customSelfReferencingRelationCanBeDeleted() {
+        UUID t = db.insertTenant();
+        int team = insertType(t, "team");
+        int member = insertRelation(t, team, "member", "relationship");
+        db.inTx(null, null, c -> {
+            exec(c, "insert into authz.relation_subject_types (tenant_id, relation_id, subject_type_id, "
+                    + "subject_relation_id) values (?, ?, ?, ?)", t, member, team, member);
+            assertThat(count(c, "select count(*) from authz.relation_subject_types where tenant_id = ? "
+                    + "and relation_id = ?", t, member)).isEqualTo(1);
+            exec(c, "delete from authz.relations where tenant_id = ? and id = ?", t, member);
+            assertThat(count(c, "select count(*) from authz.relations where tenant_id = ? and id = ?", t, member))
+                    .isZero();
+            assertThat(count(c, "select count(*) from authz.relation_subject_types where tenant_id = ? "
+                    + "and (relation_id = ? or subject_relation_id = ?)", t, member, member)).isZero();
+            return null;
+        });
+    }
+
+    @Test
+    void relationUsedAsAnotherRelationsSubjectRelationCannotBeDeleted() {
+        UUID t = db.insertTenant();
+        int team = insertType(t, "team");
+        int member = insertRelation(t, team, "member", "relationship");
+        int folder = insertType(t, "folder");
+        int viewer = insertRelation(t, folder, "viewer", "role");
+        db.inTx(null, null, c -> exec(c,
+                "insert into authz.relation_subject_types (tenant_id, relation_id, subject_type_id, "
+                + "subject_relation_id) values (?, ?, ?, ?)", t, viewer, team, member));
+        assertThat(sqlState(() -> db.inTx(null, null, c -> exec(c,
+                "delete from authz.relations where tenant_id = ? and id = ?", t, member)))).isEqualTo("23503");
+        // once the referencing row is gone the relation can be deleted
+        db.inTx(null, null, c -> {
+            exec(c, "delete from authz.relation_subject_types where tenant_id = ? and relation_id = ?", t, viewer);
+            exec(c, "delete from authz.relations where tenant_id = ? and id = ?", t, member);
+            return null;
+        });
+    }
+
+    @Test
     void usedViaRelationConditionAndTypesAreRestricted() {
         UUID t = db.insertTenant();
         int document = insertType(t, "document");

@@ -12,7 +12,10 @@ SET LOCAL ROLE rbac_owner;
 --   * Functions are SECURITY DEFINER owned by rbac_owner, so they can only partition tables
 --     rbac_owner owns (all platform tables). New partitions get no grants: only the owner touches
 --     children directly, everyone else goes through the parent and its RLS.
---   * Concurrent callers serialize on SHARE UPDATE EXCLUSIVE of the parent.
+--   * Locking: the parent is locked SHARE UPDATE EXCLUSIVE first (serializes concurrent callers),
+--     then DEFAULT ACCESS EXCLUSIVE (only when it exists). The parent lock is never escalated, so
+--     queries holding the parent (ACCESS SHARE / ROW EXCLUSIVE) cannot deadlock with the job.
+--     Dropping a partition still takes ACCESS EXCLUSIVE on the parent (inherent to DROP TABLE).
 
 -- util.partition_range_column: validates that the table is range-partitioned on exactly one plain
 -- timestamptz column and returns where it lives. Internal helper: owner-only EXECUTE.
@@ -60,7 +63,9 @@ $$;
 -- util.create_monthly_partition: creates <parent>_pYYYYMM for the UTC month containing p_month,
 -- bounds [month start, next month start). Returns false when a partition with exactly those
 -- bounds already exists. Rows already sitting in the DEFAULT partition inside the range are moved
--- into the new partition (late job): build a loose table, move the rows, then ATTACH it.
+-- into the new partition (late job). With a DEFAULT partition present it always builds a loose table,
+-- moves the in-range rows and ATTACHes it (see the locking note below); without one it uses
+-- CREATE ... PARTITION OF.
 CREATE FUNCTION util.create_monthly_partition(p_parent regclass, p_month date) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path = pg_catalog, extensions
@@ -76,7 +81,6 @@ DECLARE
     v_end      timestamptz;
     v_child    text;
     v_cols     text;
-    v_has_rows boolean;
 BEGIN
     IF p_parent IS NULL OR p_month IS NULL OR NOT isfinite(p_month) THEN
         RAISE EXCEPTION 'invalid_argument: p_parent and a finite p_month are required'
@@ -113,22 +117,20 @@ BEGIN
         RETURN false;
     END IF;
 
-    v_has_rows := false;
-    IF v_default <> 0 THEN
-        EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE', v_default::regclass);
-        EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s WHERE %I >= %L AND %I < %L)',
-                       v_default::regclass, v_col, v_start, v_col, v_end)
-        INTO v_has_rows;
-    END IF;
-
-    IF NOT v_has_rows THEN
+    IF v_default = 0 THEN
         EXECUTE format('CREATE TABLE %I.%I PARTITION OF %I.%I FOR VALUES FROM (%L) TO (%L)',
                        v_schema, v_child, v_schema, v_table, v_start, v_end);
         RETURN true;
     END IF;
 
-    -- Late job: DEFAULT already holds rows for this month, so a plain CREATE ... PARTITION OF would
-    -- fail. Move them through a loose table, then attach it (DEFAULT is locked since above).
+    -- A DEFAULT partition exists. CREATE ... PARTITION OF would take ACCESS EXCLUSIVE on the parent
+    -- (deadlock-prone against queries holding the parent and then wanting DEFAULT) and fails when
+    -- DEFAULT holds rows in range. So always: loose table, move rows out of DEFAULT, ATTACH, which
+    -- needs only SHARE UPDATE EXCLUSIVE on the parent. Lock order is parent first (above), then
+    -- DEFAULT; the parent lock is never escalated afterwards. DEFAULT stays locked from here to the
+    -- end of the transaction so no row can slip in between the move and the ATTACH check.
+    EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE', v_default::regclass);
+
     SELECT string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum) INTO v_cols
     FROM pg_attribute a
     WHERE a.attrelid = p_parent AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = '';

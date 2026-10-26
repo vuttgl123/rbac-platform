@@ -8,6 +8,7 @@ import static com.rbac_platform.db.Sql.sqlState;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.sql.Connection;
+import java.sql.SQLException;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -265,6 +266,32 @@ class PartitionMaintenanceTest {
                     .isFalse();
             assertThat(one(c, Boolean.class, "select has_table_privilege('rbac_admin', ?::regclass, 'SELECT')", child))
                     .isFalse();
+            return null;
+        });
+    }
+
+    @Test
+    void doesNotEscalateParentLockWhenDefaultExists() throws SQLException {
+        // A concurrent reader/writer holds ACCESS SHARE on the parent. With a DEFAULT partition the
+        // function must only need SHARE UPDATE EXCLUSIVE on the parent (ATTACH path), never ACCESS
+        // EXCLUSIVE, otherwise it deadlocks/blocks against such queries.
+        try (Connection a = db.dataSource().getConnection(); Connection b = db.dataSource().getConnection()) {
+            a.setAutoCommit(false);
+            b.setAutoCommit(false);
+            try {
+                exec(a, "lock table only " + parent() + " in access share mode");
+                exec(b, "set local lock_timeout = '2s'");
+                assertThat(one(b, Boolean.class,
+                        "select util.create_monthly_partition(?::regclass, date '2031-07-10')", parent()))
+                        .isTrue();
+                b.commit();
+            } finally {
+                a.rollback();
+                b.rollback();
+            }
+        }
+        db.inTx(null, null, c -> {
+            assertThat(exists(c, t + "_p203107")).isTrue();
             return null;
         });
     }

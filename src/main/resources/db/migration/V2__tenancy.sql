@@ -1,0 +1,70 @@
+SET LOCAL ROLE rbac_owner;
+
+-- V2: tenancy. Tenants (the non-tenant-scoped root) and their domains.
+
+CREATE TABLE tenancy.tenants (
+    id                   uuid        PRIMARY KEY DEFAULT util.uuid_v7(),
+    slug                 text        NOT NULL,
+    name                 text        NOT NULL,
+    status               text        NOT NULL DEFAULT 'active',
+    plan                 text        NOT NULL DEFAULT 'standard',
+    settings             jsonb       NOT NULL DEFAULT '{}',
+    authz_model_revision bigint      NOT NULL DEFAULT 0,
+    created_at           timestamptz NOT NULL DEFAULT now(),
+    updated_at           timestamptz NOT NULL DEFAULT now(),
+    deleted_at           timestamptz,
+    CONSTRAINT tenants_slug_key UNIQUE (slug),
+    CONSTRAINT tenants_slug_format CHECK (slug ~ '^[a-z0-9][a-z0-9-]{1,62}$'),
+    CONSTRAINT tenants_status_check CHECK (status IN ('active', 'suspended', 'deleted'))
+);
+
+CREATE TRIGGER tenants_set_updated_at
+    BEFORE UPDATE ON tenancy.tenants
+    FOR EACH ROW EXECUTE FUNCTION util.set_updated_at();
+
+-- tenants has no tenant_id column, so it gets its own policies instead of
+-- util.enable_tenant_rls: every tenant is readable (slug lookup at login),
+-- only the current tenant's row is updatable, and only rbac_admin can insert/delete.
+ALTER TABLE tenancy.tenants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenancy.tenants FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY app_select ON tenancy.tenants FOR SELECT TO rbac_app
+    USING (true);
+CREATE POLICY app_update ON tenancy.tenants FOR UPDATE TO rbac_app
+    USING (id = (SELECT util.current_tenant_id()))
+    WITH CHECK (id = (SELECT util.current_tenant_id()));
+CREATE POLICY admin_all ON tenancy.tenants FOR ALL TO rbac_admin
+    USING (true) WITH CHECK (true);
+CREATE POLICY owner_all ON tenancy.tenants FOR ALL TO rbac_owner
+    USING (true) WITH CHECK (true);
+
+GRANT SELECT, UPDATE ON tenancy.tenants TO rbac_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON tenancy.tenants TO rbac_admin;
+
+CREATE TABLE tenancy.tenant_domains (
+    tenant_id               uuid        NOT NULL REFERENCES tenancy.tenants (id) ON DELETE RESTRICT,
+    id                      uuid        NOT NULL DEFAULT util.uuid_v7(),
+    domain                  extensions.citext NOT NULL,
+    verified_at             timestamptz,
+    verification_token_hash text,
+    created_at              timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, id),
+    CONSTRAINT tenant_domains_domain_key UNIQUE (domain)
+);
+
+SELECT util.enable_tenant_rls('tenancy.tenant_domains');
+
+-- Domain -> tenant lookup before the tenant is known (SSO routing by email suffix).
+-- SECURITY DEFINER runs as rbac_owner, which has its own policy on tenant_domains.
+CREATE FUNCTION tenancy.resolve_domain(p_domain text) RETURNS uuid
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, extensions
+AS $$
+    SELECT d.tenant_id
+    FROM tenancy.tenant_domains d
+    WHERE d.domain = p_domain::extensions.citext
+      AND d.verified_at IS NOT NULL
+$$;
+
+REVOKE EXECUTE ON FUNCTION tenancy.resolve_domain(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION tenancy.resolve_domain(text) TO rbac_app;

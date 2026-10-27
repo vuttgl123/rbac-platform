@@ -21,6 +21,7 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.json.JsonMapper;
 
 @SpringBootTest(classes = OutboxTestApplication.class)
@@ -136,7 +137,8 @@ class OutboxStoreTest {
                     .withConfiguration(AutoConfigurations.of(OutboxAutoConfiguration.class))
                     .withBean(JdbcClient.class, () -> org.mockito.Mockito.mock(JdbcClient.class))
                     .withBean(JsonMapper.class, JsonMapper::new)
-                    .withPropertyValues("rbac.outbox.schema=" + bad)
+                    .withBean(TransactionTemplate.class, () -> org.mockito.Mockito.mock(TransactionTemplate.class))
+                    .withPropertyValues("rbac.outbox.schema=" + bad, "rbac.outbox.enabled=false")
                     .run(context -> {
                         assertThat(context).hasFailed();
                         assertThat(context).getFailure().hasStackTraceContaining("rbac.outbox.schema");
@@ -154,7 +156,8 @@ class OutboxStoreTest {
                     .withConfiguration(AutoConfigurations.of(OutboxAutoConfiguration.class))
                     .withBean(JdbcClient.class, () -> org.mockito.Mockito.mock(JdbcClient.class))
                     .withBean(JsonMapper.class, JsonMapper::new)
-                    .withPropertyValues("rbac.outbox.schema=identity", property)
+                    .withBean(TransactionTemplate.class, () -> org.mockito.Mockito.mock(TransactionTemplate.class))
+                    .withPropertyValues("rbac.outbox.schema=identity", "rbac.outbox.enabled=false", property)
                     .run(context -> {
                         assertThat(context).as(property).hasFailed();
                         assertThat(context).getFailure().hasStackTraceContaining(property.substring(0, property.indexOf('=')));
@@ -168,7 +171,9 @@ class OutboxStoreTest {
                 .withConfiguration(AutoConfigurations.of(OutboxAutoConfiguration.class))
                 .withBean(JdbcClient.class, () -> org.mockito.Mockito.mock(JdbcClient.class))
                 .withBean(JsonMapper.class, JsonMapper::new)
-                .withPropertyValues("rbac.outbox.schema=identity")
+                .withBean(TransactionTemplate.class, () -> org.mockito.Mockito.mock(TransactionTemplate.class))
+                // Not started: the relay would poll the mocked JdbcClient.
+                .withPropertyValues("rbac.outbox.schema=identity", "rbac.outbox.enabled=false")
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context).hasSingleBean(OutboxWriter.class).hasSingleBean(OutboxStore.class)

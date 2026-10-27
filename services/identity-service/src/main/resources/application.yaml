@@ -1,0 +1,16 @@
+spring:
+  application:
+    name: identity-service
+  config:
+    import:
+      - optional:file:.env[.properties]
+      - optional:file:../../.env[.properties]
+      - classpath:rbac/db-defaults.yaml
+  datasource:
+    username: ${IDENTITY_DB_USER:identity_app}
+    password: ${IDENTITY_DB_PASSWORD}
+server:
+  port: 8081
+rbac:
+  db:
+    expected-role: identity_app

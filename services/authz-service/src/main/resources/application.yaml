@@ -1,0 +1,16 @@
+spring:
+  application:
+    name: authz-service
+  config:
+    import:
+      - optional:file:.env[.properties]
+      - optional:file:../../.env[.properties]
+      - classpath:rbac/db-defaults.yaml
+  datasource:
+    username: ${AUTHZ_DB_USER:authz_app}
+    password: ${AUTHZ_DB_PASSWORD}
+server:
+  port: 8082
+rbac:
+  db:
+    expected-role: authz_app

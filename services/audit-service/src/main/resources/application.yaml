@@ -1,0 +1,16 @@
+spring:
+  application:
+    name: audit-service
+  config:
+    import:
+      - optional:file:.env[.properties]
+      - optional:file:../../.env[.properties]
+      - classpath:rbac/db-defaults.yaml
+  datasource:
+    username: ${AUDIT_DB_USER:audit_app}
+    password: ${AUDIT_DB_PASSWORD}
+server:
+  port: 8083
+rbac:
+  db:
+    expected-role: audit_app

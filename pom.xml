@@ -20,6 +20,9 @@
 		<module>libs/lib-db</module>
 		<module>db-migrations</module>
 		<module>test-support</module>
+		<module>services/identity-service</module>
+		<module>services/authz-service</module>
+		<module>services/audit-service</module>
 	</modules>
 
 	<properties>

@@ -42,6 +42,7 @@ class TenantIsolationTest {
                          + "join pg_namespace n on n.oid = cl.relnamespace "
                          + "where n.nspname = any(" + SCHEMAS + ") and cl.relkind in ('r','p') "
                          + "and not cl.relispartition "
+                         + "and cl.relname <> 'outbox' " // insert-only, covered by OutboxSchemaTest
                          + "and exists (select 1 from pg_attribute a where a.attrelid = cl.oid "
                          + "  and a.attname = 'tenant_id' and a.attnum > 0 and not a.attisdropped) "
                          + "order by 1")) {

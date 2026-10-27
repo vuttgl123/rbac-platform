@@ -98,7 +98,19 @@ class ServiceRolesTest {
             "column apps.applications.tenant_id SELECT",
             "column apps.applications.id SELECT");
 
+    /** V12: the outbox of each service, which only that service's role may use (INSERT plus relay functions). */
+    private static final List<String> IDENTITY_OUTBOX = outboxEntries("identity");
+    private static final List<String> AUTHZ_OUTBOX = outboxEntries("authz");
+
     private final MigratedDatabase db = MigratedDatabase.get();
+
+    private static List<String> outboxEntries(String schema) {
+        return List.of(
+                "table " + schema + ".outbox INSERT",
+                "function " + schema + ".outbox_claim(integer,interval,uuid) EXECUTE",
+                "function " + schema + ".outbox_complete(uuid,uuid[]) EXECUTE",
+                "function " + schema + ".outbox_reschedule(uuid,uuid,text,timestamp with time zone,boolean) EXECUTE");
+    }
 
     private static List<String> strings(Connection c, String sql, Object... args) throws SQLException {
         List<String> out = new ArrayList<>();
@@ -173,9 +185,11 @@ class ServiceRolesTest {
         db.inTx(null, null, c -> {
             List<String> identityExpected = new ArrayList<>(SHARED);
             identityExpected.addAll(rbacAppEntriesIn(c, "tenancy", "identity", "apps"));
+            identityExpected.addAll(IDENTITY_OUTBOX);
             List<String> authzExpected = new ArrayList<>(SHARED);
             authzExpected.addAll(rbacAppEntriesIn(c, "authz"));
             authzExpected.addAll(AUTHZ_ENTITY_IDS);
+            authzExpected.addAll(AUTHZ_OUTBOX);
             List<String> auditExpected = new ArrayList<>(SHARED);
             auditExpected.addAll(rbacAppEntriesIn(c, "audit"));
 
@@ -389,7 +403,7 @@ class ServiceRolesTest {
             // Only those policies name the service roles.
             assertThat(strings(c, "select schemaname || '.' || tablename || ' ' || policyname from pg_policies "
                     + "where roles && array['identity_app', 'authz_app', 'audit_app']::name[] "
-                    + "and not ('rbac_app' = any (roles))")).isEmpty();
+                    + "and not ('rbac_app' = any (roles)) and tablename <> 'outbox'")).isEmpty();
             return null;
         });
     }
@@ -412,6 +426,24 @@ class ServiceRolesTest {
             assertThat(one(c, String.class, "select proconfig::text from pg_proc "
                     + "where oid = 'authz.delete_entity_relationships()'::regprocedure"))
                     .isEqualTo("{\"search_path=pg_catalog, extensions\"}");
+            return null;
+        });
+    }
+
+    @Test
+    void adminGetsOnlyTheOutboxOperatorFunctions() {
+        db.inTx(null, null, c -> {
+            List<String> outboxEntries = new ArrayList<>();
+            for (String entry : aclEntries(c, "rbac_admin")) {
+                if (entry.contains("outbox")) {
+                    outboxEntries.add(entry);
+                }
+            }
+            assertThat(outboxEntries).containsExactlyInAnyOrder(
+                    "function identity.outbox_dead(integer) EXECUTE",
+                    "function identity.outbox_requeue(uuid[]) EXECUTE",
+                    "function authz.outbox_dead(integer) EXECUTE",
+                    "function authz.outbox_requeue(uuid[]) EXECUTE");
             return null;
         });
     }

@@ -126,7 +126,7 @@ class SupabaseExposureTest {
     void appRoleCannotExecuteAdminOnlyFunctions() {
         db.inTx(null, null, c -> {
             List<String> names = List.of("create_tenant", "create_monthly_partition", "ensure_monthly_partitions",
-                    "drop_partitions_older_than", "seed_builtin_model", "enable_tenant_rls");
+                    "drop_partitions_older_than", "seed_builtin_model", "enable_tenant_rls", "create_outbox");
             for (String name : names) {
                 List<String> signatures = strings(c, "select p.oid::regprocedure::text from pg_proc p "
                         + "join pg_namespace n on n.oid = p.pronamespace "

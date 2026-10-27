@@ -5,7 +5,7 @@
   values can come from .env / environment variables.
 
   Every line carries [requestId tenantId] ("-" when unknown): find one request with
-    grep <requestId> logs/rbac-platform*.log
+    grep <requestId> logs/<spring.application.name>*.log   (relative to the working directory)
 
   Switches (in .env or the environment):
     LOG_LEVEL_APP  level for com.rbac_platform                        (default INFO)

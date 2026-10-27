@@ -10,7 +10,7 @@
 	</parent>
 	<artifactId>db-migrations</artifactId>
 	<name>db-migrations</name>
-	<description>Flyway migrations V1-V10 and the embedded-Postgres test helpers that apply them</description>
+	<description>Flyway migrations V1-V11 and the embedded-Postgres test helpers that apply them</description>
 
 	<dependencies>
 		<dependency>

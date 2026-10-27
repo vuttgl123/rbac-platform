@@ -6,7 +6,8 @@ import org.springframework.boot.SpringApplication;
 
 /**
  * Runs the audit service locally against a throwaway embedded Postgres with every migration applied,
- * connected as audit_app exactly as in production: {@code ./mvnw -pl services/audit-service spring-boot:test-run}.
+ * connected as audit_app exactly as in production: {@code ./mvnw -q install -DskipTests && ./mvnw -pl services/audit-service spring-boot:test-run}
+ * (the install puts the sibling modules, including the db-migrations test-jar, in ~/.m2; repeat it after editing them).
  * Data is gone when the process stops.
  */
 public class TestAuditServiceApplication {

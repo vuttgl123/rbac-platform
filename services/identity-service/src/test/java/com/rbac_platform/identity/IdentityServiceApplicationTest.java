@@ -9,15 +9,20 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.Base64;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
+@ExtendWith(OutputCaptureExtension.class)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class IdentityServiceApplicationTest {
 
@@ -58,6 +63,18 @@ class IdentityServiceApplicationTest {
 
         assertThat(response.statusCode()).isEqualTo(401);
         assertThat(response.headers().firstValue("X-Request-Id")).hasValueSatisfying(id -> assertThat(id).matches(UUID_PATTERN));
+    }
+
+    @Test
+    void noGeneratedLoginExistsAndAnyBasicCredentialIsRejected(CapturedOutput output) throws Exception {
+        String credentials = Base64.getEncoder().encodeToString("user:anything".getBytes());
+        HttpRequest request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/anything"))
+                .header("Authorization", "Basic " + credentials).GET().build();
+
+        HttpResponse<String> response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+
+        assertThat(response.statusCode()).isEqualTo(401);
+        assertThat(output.getAll()).doesNotContain("generated security password");
     }
 
     @Test

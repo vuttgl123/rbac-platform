@@ -6,6 +6,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.SecurityFilterChain;
 
 @Configuration
@@ -22,5 +23,14 @@ class SecurityConfig {
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .csrf(csrf -> csrf.disable())
                 .build();
+    }
+
+    /**
+     * No local users: stops Boot from creating its default "user" with a generated, logged password.
+     * Until real authentication exists, nothing but /actuator/health is reachable.
+     */
+    @Bean
+    InMemoryUserDetailsManager userDetailsService() {
+        return new InMemoryUserDetailsManager();
     }
 }

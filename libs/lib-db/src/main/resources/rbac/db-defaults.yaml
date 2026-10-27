@@ -1,0 +1,12 @@
+# Data source settings shared by every service. A service imports this file with
+#   spring.config.import: classpath:rbac/db-defaults.yaml
+# and supplies its own spring.datasource.username, spring.datasource.password and rbac.db.expected-role.
+spring:
+  datasource:
+    url: ${DB_URL}
+    hikari:
+      pool-name: ${spring.application.name}-db
+      maximum-pool-size: ${DB_POOL_SIZE:5}
+      connection-timeout: 10000
+      data-source-properties:
+        ApplicationName: ${spring.application.name}

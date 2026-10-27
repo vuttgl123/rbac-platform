@@ -16,7 +16,7 @@ class DatabaseConnectionCheckTest {
     @Test
     void acceptsAppRoleAndReportsWhereItConnected() {
         DriverManagerDataSource app = new DriverManagerDataSource(db.jdbcUrl(), "rbac_app", "unused");
-        DatabaseConnectionCheck.ConnectionInfo info = new DatabaseConnectionCheck(JdbcClient.create(app)).verify();
+        DatabaseConnectionCheck.ConnectionInfo info = new DatabaseConnectionCheck(JdbcClient.create(app), "rbac_app").verify();
         assertThat(info.user()).isEqualTo("rbac_app");
         assertThat(info.database()).isEqualTo("postgres");
         assertThat(info.serverVersion()).startsWith("17.");
@@ -24,9 +24,25 @@ class DatabaseConnectionCheckTest {
 
     @Test
     void refusesRolesThatBypassRowLevelSecurity() {
-        assertThatThrownBy(() -> new DatabaseConnectionCheck(JdbcClient.create(db.dataSource())).verify())
+        assertThatThrownBy(() -> new DatabaseConnectionCheck(JdbcClient.create(db.dataSource()), "postgres").verify())
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("postgres")
                 .hasMessageContaining("bypasses row-level security");
+    }
+
+    @Test
+    void refusesAConnectionAsAnotherRole() {
+        DriverManagerDataSource app = new DriverManagerDataSource(db.jdbcUrl(), "rbac_app", "unused");
+        assertThatThrownBy(() -> new DatabaseConnectionCheck(JdbcClient.create(app), "identity_app").verify())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("expects database role 'identity_app'")
+                .hasMessageContaining("rbac_app");
+    }
+
+    @Test
+    void requiresAnExpectedRole() {
+        assertThatThrownBy(() -> new DatabaseConnectionCheck(JdbcClient.create(db.dataSource()), " "))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("rbac.db.expected-role");
     }
 }

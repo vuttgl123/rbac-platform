@@ -25,6 +25,8 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
 
     public static final String HEADER = "X-Request-Id";
     public static final String MDC_KEY = "requestId";
+    // Also kept on the request: the MDC is cleared before the container's error dispatch runs.
+    public static final String REQUEST_ATTRIBUTE = "rbac.requestId";
 
     // An incoming id (from a gateway or caller) is kept only if it cannot forge or break a log line.
     private static final Pattern SAFE_ID = Pattern.compile("[A-Za-z0-9._:-]{1,64}");
@@ -37,6 +39,7 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
         String incoming = request.getHeader(HEADER);
         String requestId = incoming != null && SAFE_ID.matcher(incoming).matches() ? incoming : UUID.randomUUID().toString();
         MDC.put(MDC_KEY, requestId);
+        request.setAttribute(REQUEST_ATTRIBUTE, requestId);
         response.setHeader(HEADER, requestId);
         long start = System.nanoTime();
         try {

@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.rbac_platform.AppDatabase;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -58,6 +59,20 @@ class TenantScopeTest {
         assertThat(tenantScope.call(b, this::visibleUsers)).isEqualTo(1);
         // The tenant setting is transaction-local: nothing leaks to the next use of the pooled connection.
         assertThat(visibleUsers()).isZero();
+    }
+
+    @Test
+    void scopePutsTheTenantIntoTheLogContextAndRestoresItAfterwards() {
+        UUID a = db.insertTenant();
+        MDC.put(TenantScope.MDC_KEY, "outer");
+        try {
+            assertThat(tenantScope.call(a, () -> MDC.get(TenantScope.MDC_KEY))).isEqualTo(a.toString());
+            assertThat(MDC.get(TenantScope.MDC_KEY)).isEqualTo("outer");
+        } finally {
+            MDC.remove(TenantScope.MDC_KEY);
+        }
+        tenantScope.call(a, this::visibleUsers);
+        assertThat(MDC.get(TenantScope.MDC_KEY)).isNull();
     }
 
     @Test

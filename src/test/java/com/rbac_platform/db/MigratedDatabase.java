@@ -25,9 +25,11 @@ public final class MigratedDatabase {
     private static volatile MigratedDatabase instance;
 
     private final DataSource dataSource;
+    private final String jdbcUrl;
 
-    private MigratedDatabase(DataSource dataSource) {
+    private MigratedDatabase(DataSource dataSource, String jdbcUrl) {
         this.dataSource = dataSource;
+        this.jdbcUrl = jdbcUrl;
     }
 
     public static MigratedDatabase get() {
@@ -70,10 +72,15 @@ public final class MigratedDatabase {
                     .placeholders(Map.of("platform_operator_email", "operator@platform.test"))
                     .load()
                     .migrate();
-            return new MigratedDatabase(ds);
+            return new MigratedDatabase(ds, "jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
         } catch (IOException | SQLException e) {
             throw new IllegalStateException("failed to start migrated embedded Postgres", e);
         }
+    }
+
+    /** JDBC URL of the database (no credentials); local connections are trusted, any role with LOGIN works. */
+    public String jdbcUrl() {
+        return jdbcUrl;
     }
 
     /** Superuser data source. */

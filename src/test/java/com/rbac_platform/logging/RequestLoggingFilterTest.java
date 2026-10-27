@@ -48,7 +48,7 @@ class RequestLoggingFilterTest {
 
         String id = response.getHeader(RequestLoggingFilter.HEADER);
         assertThat(id).matches(UUID_PATTERN);
-        assertThat(output).containsPattern("\\[" + id + " -\\].*handling things");
+        assertThat(output).containsPattern("\\[" + id + " -\\] \\S.*handling things");
         assertThat(output).containsPattern("\\[" + id + " -\\].*GET /things -> 200 in \\d+ ms");
     }
 

@@ -1,12 +1,4 @@
 spring:
   application:
     name: rbac-platform
-
-# Production logs go to stdout as ECS JSON (one object per line, MDC fields such as requestId and tenantId
-# included) for a log shipper / Elasticsearch to index; no local file.
-logging:
-  structured:
-    format:
-      console: ecs
-  file:
-    name: ""
+# Logging for this profile (ECS JSON on stdout) is configured in logback-spring.xml.

@@ -17,19 +17,4 @@ spring:
       connection-timeout: 10000 # ms
       data-source-properties:
         ApplicationName: rbac-platform
-
-logging:
-  pattern:
-    # Added to every line: [requestId tenantId], "-" when unknown. Find one request with: grep <requestId> logs/*.log
-    correlation: "[%X{requestId:--} %X{tenantId:--}] "
-  file:
-    name: ${LOG_FILE:logs/rbac-platform.log}
-  logback:
-    rollingpolicy:
-      max-file-size: 10MB
-      max-history: 14
-      total-size-cap: 1GB
-  level:
-    com.rbac_platform: ${LOG_LEVEL_APP:INFO}
-    # Set LOG_LEVEL_SQL=DEBUG to log every SQL statement the app runs.
-    org.springframework.jdbc.core: ${LOG_LEVEL_SQL:INFO}
+# Logging is configured in logback-spring.xml.

@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  All logging configuration lives in this file (no logging.* keys in application*.yaml).
+  Named logback-spring.xml, not logback.xml, so that <springProfile> and <springProperty> work and
+  values can come from .env / environment variables.
+
+  Every line carries [requestId tenantId] ("-" when unknown): find one request with
+    grep <requestId> logs/rbac-platform*.log
+
+  Switches (in .env or the environment):
+    LOG_LEVEL_APP  level for com.rbac_platform                        (default INFO)
+    LOG_LEVEL_SQL  DEBUG logs every SQL statement the app runs         (default INFO)
+    LOG_DIR        directory for the log files                        (default logs)
+
+  Local (any profile but prod): coloured console + logs/<app>.log (everything) + logs/<app>-error.log (ERROR only).
+  prod: ECS JSON on stdout, one object per line with requestId/tenantId fields, for a log shipper; no files.
+-->
+<configuration>
+    <!-- Spring Boot's conversion words: %clr (colour) and %wEx (stack traces). -->
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <springProperty name="APP_NAME" source="spring.application.name" defaultValue="app"/>
+    <springProperty name="LOG_DIR" source="LOG_DIR" defaultValue="logs"/>
+    <springProperty name="LOG_LEVEL_APP" source="LOG_LEVEL_APP" defaultValue="INFO"/>
+    <springProperty name="LOG_LEVEL_SQL" source="LOG_LEVEL_SQL" defaultValue="INFO"/>
+
+    <!-- time level pid [app] [thread] [requestId tenantId] logger : message -->
+    <property name="APP_CONSOLE_PATTERN"
+              value="%clr(%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX}){faint} %clr(%5p) %clr(${PID:-}){magenta} %clr(--- [${APP_NAME}] [%15.15t]){faint} [%X{requestId:--} %X{tenantId:--}] %clr(%-40.40logger{39}){cyan} %clr(:){faint} %m%n%wEx"/>
+    <property name="APP_FILE_PATTERN"
+              value="%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %5p ${PID:-} --- [${APP_NAME}] [%t] [%X{requestId:--} %X{tenantId:--}] %-40.40logger{39} : %m%n%wEx"/>
+
+    <logger name="com.rbac_platform" level="${LOG_LEVEL_APP}"/>
+    <logger name="org.springframework.jdbc.core" level="${LOG_LEVEL_SQL}"/>
+
+    <springProfile name="!prod">
+        <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder>
+                <pattern>${APP_CONSOLE_PATTERN}</pattern>
+                <charset>UTF-8</charset>
+            </encoder>
+        </appender>
+
+        <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+            <file>${LOG_DIR}/${APP_NAME}.log</file>
+            <encoder>
+                <pattern>${APP_FILE_PATTERN}</pattern>
+                <charset>UTF-8</charset>
+            </encoder>
+            <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+                <fileNamePattern>${LOG_DIR}/${APP_NAME}-%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+                <maxFileSize>10MB</maxFileSize>
+                <maxHistory>14</maxHistory>
+                <totalSizeCap>1GB</totalSizeCap>
+            </rollingPolicy>
+        </appender>
+
+        <!-- Only ERROR: open this file first when hunting a bug. Kept longer than the main file. -->
+        <appender name="ERROR_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+            <file>${LOG_DIR}/${APP_NAME}-error.log</file>
+            <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+                <level>ERROR</level>
+            </filter>
+            <encoder>
+                <pattern>${APP_FILE_PATTERN}</pattern>
+                <charset>UTF-8</charset>
+            </encoder>
+            <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+                <fileNamePattern>${LOG_DIR}/${APP_NAME}-error-%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+                <maxFileSize>10MB</maxFileSize>
+                <maxHistory>30</maxHistory>
+                <totalSizeCap>500MB</totalSizeCap>
+            </rollingPolicy>
+        </appender>
+
+        <!--
+          Async: request threads only enqueue, a background thread writes the file.
+          discardingThreshold 0 keeps every level (the default silently drops INFO and below when the queue
+          is 80% full, which would leave holes in a request's trace); a full queue makes callers wait instead.
+        -->
+        <appender name="ASYNC_FILE" class="ch.qos.logback.classic.AsyncAppender">
+            <queueSize>8192</queueSize>
+            <discardingThreshold>0</discardingThreshold>
+            <appender-ref ref="FILE"/>
+        </appender>
+        <appender name="ASYNC_ERROR_FILE" class="ch.qos.logback.classic.AsyncAppender">
+            <queueSize>1024</queueSize>
+            <discardingThreshold>0</discardingThreshold>
+            <appender-ref ref="ERROR_FILE"/>
+        </appender>
+
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="ASYNC_FILE"/>
+            <appender-ref ref="ASYNC_ERROR_FILE"/>
+        </root>
+    </springProfile>
+
+    <springProfile name="prod">
+        <appender name="JSON_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="org.springframework.boot.logging.logback.StructuredLogEncoder">
+                <format>ecs</format>
+                <charset>UTF-8</charset>
+            </encoder>
+        </appender>
+        <appender name="ASYNC_JSON_CONSOLE" class="ch.qos.logback.classic.AsyncAppender">
+            <queueSize>8192</queueSize>
+            <discardingThreshold>0</discardingThreshold>
+            <appender-ref ref="JSON_CONSOLE"/>
+        </appender>
+
+        <root level="INFO">
+            <appender-ref ref="ASYNC_JSON_CONSOLE"/>
+        </root>
+    </springProfile>
+</configuration>

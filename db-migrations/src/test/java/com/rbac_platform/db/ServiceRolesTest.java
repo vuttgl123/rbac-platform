@@ -102,6 +102,11 @@ class ServiceRolesTest {
     private static final List<String> IDENTITY_OUTBOX = outboxEntries("identity");
     private static final List<String> AUTHZ_OUTBOX = outboxEntries("authz");
 
+    /** V13: the Spring Batch repository of each service, plus the partition maintenance function where one exists. */
+    private static final List<String> IDENTITY_BATCH = batchEntries("identity");
+    private static final List<String> AUTHZ_BATCH = batchEntries("authz");
+    private static final List<String> AUDIT_BATCH = batchEntries("audit");
+
     private final MigratedDatabase db = MigratedDatabase.get();
 
     private static List<String> outboxEntries(String schema) {
@@ -110,6 +115,24 @@ class ServiceRolesTest {
                 "function " + schema + ".outbox_claim(integer,interval,uuid) EXECUTE",
                 "function " + schema + ".outbox_complete(uuid,uuid[]) EXECUTE",
                 "function " + schema + ".outbox_reschedule(uuid,uuid,text,timestamp with time zone,boolean) EXECUTE");
+    }
+
+    private static List<String> batchEntries(String s) {
+        List<String> entries = new ArrayList<>();
+        for (String table : List.of("batch_job_instance", "batch_job_execution", "batch_job_execution_params",
+                "batch_step_execution", "batch_step_execution_context", "batch_job_execution_context")) {
+            for (String privilege : List.of("SELECT", "INSERT", "UPDATE")) {
+                entries.add("table " + s + "." + table + " " + privilege);
+            }
+        }
+        entries.add("table " + s + ".batch_schedule_slot SELECT");
+        entries.add("table " + s + ".batch_schedule_slot INSERT");
+        for (String sequence : List.of("batch_step_execution_seq", "batch_job_execution_seq",
+                "batch_job_instance_seq")) {
+            entries.add("table " + s + "." + sequence + " USAGE");
+            entries.add("table " + s + "." + sequence + " SELECT");
+        }
+        return entries;
     }
 
     private static List<String> strings(Connection c, String sql, Object... args) throws SQLException {
@@ -186,12 +209,17 @@ class ServiceRolesTest {
             List<String> identityExpected = new ArrayList<>(SHARED);
             identityExpected.addAll(rbacAppEntriesIn(c, "tenancy", "identity", "apps"));
             identityExpected.addAll(IDENTITY_OUTBOX);
+            identityExpected.addAll(IDENTITY_BATCH);
             List<String> authzExpected = new ArrayList<>(SHARED);
             authzExpected.addAll(rbacAppEntriesIn(c, "authz"));
             authzExpected.addAll(AUTHZ_ENTITY_IDS);
             authzExpected.addAll(AUTHZ_OUTBOX);
+            authzExpected.addAll(AUTHZ_BATCH);
+            authzExpected.add("function authz.maintain_partitions() EXECUTE");
             List<String> auditExpected = new ArrayList<>(SHARED);
             auditExpected.addAll(rbacAppEntriesIn(c, "audit"));
+            auditExpected.addAll(AUDIT_BATCH);
+            auditExpected.add("function audit.maintain_partitions() EXECUTE");
 
             // Guard against a vacuous pass: the copied sets contain the known privileges of each schema.
             assertThat(identityExpected).contains("column tenancy.tenants.name UPDATE",

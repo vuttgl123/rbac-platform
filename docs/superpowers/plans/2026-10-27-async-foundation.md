@@ -546,7 +546,8 @@
     - `publishedEventsAreDeleted`
       - Two appended events give `runOnce() == 2`. The publisher saw both, in id order, and the outbox is empty afterwards.
     - `failedEventIsRescheduledWithBackoffAndError`
-      - The row stays pending with `attempts = 1`, `next_attempt_at` between `now()+0.8s` and `now()+1s`, `last_error` containing the exception message, and `claim_token` null.
+      - The row stays pending with `attempts = 1`, `last_error` containing the exception message, and `claim_token` null.
+      - `next_attempt_at` lies between `t0 + 0.8s` and `t1 + 1s`, where `t0` and `t1` are `Instant.now()` taken just before and just after `runOnce()`.
     - `oneFailingEventDoesNotHoldBackTheRestOfItsBatch`
       - Of three events, the middle one fails. Two are deleted and one is pending.
     - `nonRetryableFailureBuriesTheEvent`

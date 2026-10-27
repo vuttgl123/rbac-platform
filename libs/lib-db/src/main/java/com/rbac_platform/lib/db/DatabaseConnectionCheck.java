@@ -48,7 +48,7 @@ public class DatabaseConnectionCheck implements ApplicationRunner {
                     if (rs.getBoolean(4)) {
                         throw new IllegalStateException("Refusing to run as database role '" + user
                                 + "': it bypasses row-level security, so tenants would see each other's data."
-                                + " Connect as '" + expectedRole + "' instead.");
+                                + " Connect as a role without SUPERUSER or BYPASSRLS (this service expects '" + expectedRole + "').");
                     }
                     if (!user.equals(expectedRole)) {
                         throw new IllegalStateException("This service expects database role '" + expectedRole

@@ -1,6 +1,7 @@
 package com.rbac_platform.lib.db;
 
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.jdbc.autoconfigure.JdbcClientAutoConfiguration;
 import org.springframework.boot.transaction.autoconfigure.TransactionAutoConfiguration;
@@ -14,11 +15,13 @@ import org.springframework.transaction.support.TransactionTemplate;
 public class DbAutoConfiguration {
 
     @Bean
+    @ConditionalOnMissingBean
     TenantScope tenantScope(JdbcClient jdbc, TransactionTemplate transactions) {
         return new TenantScope(jdbc, transactions);
     }
 
     @Bean
+    @ConditionalOnMissingBean
     DatabaseConnectionCheck databaseConnectionCheck(JdbcClient jdbc, DbProperties properties) {
         return new DatabaseConnectionCheck(jdbc, properties.expectedRole());
     }

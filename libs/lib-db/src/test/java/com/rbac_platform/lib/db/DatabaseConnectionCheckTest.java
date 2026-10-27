@@ -27,7 +27,9 @@ class DatabaseConnectionCheckTest {
         assertThatThrownBy(() -> new DatabaseConnectionCheck(JdbcClient.create(db.dataSource()), "postgres").verify())
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("postgres")
-                .hasMessageContaining("bypasses row-level security");
+                .hasMessageContaining("bypasses row-level security")
+                .hasMessageContaining("without SUPERUSER or BYPASSRLS")
+                .hasMessageNotContaining("instead");
     }
 
     @Test

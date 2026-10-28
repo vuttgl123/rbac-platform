@@ -1,0 +1,4 @@
+# As a service does: lib-batch's defaults point Spring Batch at the rbac.batch.schema each test sets.
+spring:
+  config:
+    import: classpath:rbac/batch-defaults.yaml

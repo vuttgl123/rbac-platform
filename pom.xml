@@ -19,6 +19,7 @@
 		<module>libs/lib-core</module>
 		<module>libs/lib-db</module>
 		<module>libs/lib-outbox</module>
+		<module>libs/lib-batch</module>
 		<module>db-migrations</module>
 		<module>test-support</module>
 		<module>services/identity-service</module>
@@ -45,6 +46,11 @@
 			<dependency>
 				<groupId>com.rbac_platform</groupId>
 				<artifactId>lib-outbox</artifactId>
+				<version>${project.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>com.rbac_platform</groupId>
+				<artifactId>lib-batch</artifactId>
 				<version>${project.version}</version>
 			</dependency>
 			<dependency>

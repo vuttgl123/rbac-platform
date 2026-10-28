@@ -1,0 +1,12 @@
+# Spring Batch settings shared by every service that runs jobs. A service imports this file with
+#   spring.config.import: classpath:rbac/batch-defaults.yaml
+# and sets rbac.batch.schema to its own schema, which holds its job repository (V13).
+spring:
+  batch:
+    jdbc:
+      table-prefix: ${rbac.batch.schema}.batch_
+      # The repository tables come from the migrations; no service creates them.
+      initialize-schema: never
+    job:
+      # Jobs run when they are scheduled (rbac.batch.jobs) or launched, never at startup.
+      enabled: false

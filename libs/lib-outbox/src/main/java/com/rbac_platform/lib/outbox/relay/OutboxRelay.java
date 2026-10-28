@@ -114,7 +114,11 @@ public class OutboxRelay implements SmartLifecycle {
         return claimed.size();
     }
 
-    /** Publishes one event between the interceptors; returns null when delivered. The log context is restored whatever happens. */
+    /**
+     * Publishes one event between the interceptors; returns null when delivered. Whatever the event throws, Errors
+     * included, becomes its own failure, so one bad event never holds back the rest of its batch; only a
+     * {@link #rethrowIfFatal fatal} error escapes. The log context is restored whatever happens.
+     */
     private Failure deliver(OutboxRecord record) {
         Map<String, String> previousMdc = MDC.getCopyOfContextMap();
         EventEnvelope event = record.toEnvelope();
@@ -129,26 +133,52 @@ public class OutboxRelay implements SmartLifecycle {
                 interceptor.after(event, took);
             }
             return null;
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            rethrowIfFatal(e);
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
             for (OutboxInterceptor interceptor : unwinding) {
                 try {
                     interceptor.onError(event, e);
-                } catch (RuntimeException suppressed) {
+                } catch (Throwable suppressed) {
+                    rethrowIfFatal(suppressed);
                     log.warn("Outbox interceptor {} failed in onError for event {}", interceptor.getClass().getName(),
                             event.id(), suppressed);
                 }
             }
             String message = e.getClass().getName() + ": " + e.getMessage();
-            return new Failure(record, message, retryPolicy.decide(record, e, Instant.now()));
+            return new Failure(record, message, decide(record, e));
         } finally {
             if (previousMdc == null) {
                 MDC.clear();
             } else {
                 MDC.setContextMap(previousMdc);
             }
+        }
+    }
+
+    /** The retry policy's decision; a policy that throws (or answers null) falls back to retrying after backoff.max. */
+    private RetryDecision decide(OutboxRecord record, Throwable failure) {
+        Instant now = Instant.now();
+        try {
+            return Objects.requireNonNull(retryPolicy.decide(record, failure, now), "retry decision");
+        } catch (Throwable policyFailure) {
+            rethrowIfFatal(policyFailure);
+            Duration fallback = properties.backoff().max();
+            log.error("Retry policy {} failed for outbox event {} ({}); retrying it in {} ms",
+                    retryPolicy.getClass().getName(), record.id(), record.eventType(), fallback.toMillis(), policyFailure);
+            return new RetryDecision.RetryAt(now.plus(fallback));
+        }
+    }
+
+    /**
+     * Errors the JVM may not survive (out of memory, internal error) are not one event's fault: they leave the batch
+     * unacknowledged, to be claimed again when the lease expires. A stack overflow is the event's own.
+     */
+    private static void rethrowIfFatal(Throwable t) {
+        if (t instanceof VirtualMachineError fatal && !(t instanceof StackOverflowError)) {
+            throw fatal;
         }
     }
 

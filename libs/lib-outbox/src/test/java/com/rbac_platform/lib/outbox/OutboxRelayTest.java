@@ -1,6 +1,7 @@
 package com.rbac_platform.lib.outbox;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
 import com.rbac_platform.lib.core.event.EventEnvelope;
@@ -10,6 +11,7 @@ import com.rbac_platform.lib.db.TenantScope;
 import com.rbac_platform.lib.outbox.publish.OutboxPublisher;
 import com.rbac_platform.lib.outbox.relay.OutboxInterceptor;
 import com.rbac_platform.lib.outbox.relay.OutboxRelay;
+import com.rbac_platform.lib.outbox.retry.RetryPolicy;
 import com.rbac_platform.testsupport.AppDatabase;
 import com.rbac_platform.testsupport.MigratedDatabase;
 import com.rbac_platform.testsupport.Sql;
@@ -83,7 +85,7 @@ class OutboxRelayTest {
     /** Records every envelope it is given; fails or blocks on the event types it is told to. */
     static final class RecordingPublisher implements OutboxPublisher {
         final List<EventEnvelope> seen = new CopyOnWriteArrayList<>();
-        final Map<String, Exception> failures = new ConcurrentHashMap<>();
+        final Map<String, Throwable> failures = new ConcurrentHashMap<>();
         final Map<String, Gate> gates = new ConcurrentHashMap<>();
         volatile Consumer<EventEnvelope> probe = event -> {
         };
@@ -96,9 +98,12 @@ class OutboxRelayTest {
             if (gate != null) {
                 gate.pass();
             }
-            Exception failure = failures.get(event.eventType());
+            Throwable failure = failures.get(event.eventType());
+            if (failure instanceof Error error) {
+                throw error;
+            }
             if (failure != null) {
-                throw failure;
+                throw (Exception) failure;
             }
         }
 
@@ -178,7 +183,23 @@ class OutboxRelayTest {
         OutboxInterceptor firstInterceptor(Trace interceptorTrace) {
             return new TracingInterceptor("first", interceptorTrace);
         }
+
+        /** Innermost, so it unwinds first; its onError breaks, with an Error, on the one event type that asks for it. */
+        @Bean
+        @Order(3)
+        OutboxInterceptor brokenOnErrorInterceptor() {
+            return new OutboxInterceptor() {
+                @Override
+                public void onError(EventEnvelope event, Throwable failure) {
+                    if (event.eventType().equals(BROKEN_ON_ERROR)) {
+                        throw new AssertionError("interceptor bug");
+                    }
+                }
+            };
+        }
     }
+
+    static final String BROKEN_ON_ERROR = "test.broken-on-error";
 
     // ---- helpers over the superuser connection: they see every tenant and bypass row-level security ----
 
@@ -420,6 +441,108 @@ class OutboxRelayTest {
                     .containsExactly("first.before", "second.before", "second.onError", "first.onError");
         }
 
+        @Test
+        void anErrorFromThePublisherDoesNotHoldBackTheRestOfItsBatch() {
+            publisher.failures.put("test.error", new AssertionError("handler bug"));
+            List<UUID> ids = append("test.ok", "test.error", "test.ok");
+
+            assertThat(relay.runOnce()).isEqualTo(3);
+
+            assertThat(exists(ids.get(0))).isFalse();
+            assertThat(exists(ids.get(2))).isFalse();
+            assertThat(status(ids.get(1))).isEqualTo("pending");
+            assertThat(attempts(ids.get(1))).isEqualTo(1);
+            assertThat(column(ids.get(1), "claim_token", UUID.class)).isNull();
+            assertThat(column(ids.get(1), "last_error", String.class)).isEqualTo("java.lang.AssertionError: handler bug");
+        }
+
+        @Test
+        void aThrowingOnErrorInterceptorDoesNotHoldBackTheBatch() {
+            publisher.failures.put(BROKEN_ON_ERROR, new IllegalStateException("downstream unavailable"));
+            List<UUID> ids = append("test.ok", BROKEN_ON_ERROR, "test.ok");
+
+            assertThat(relay.runOnce()).isEqualTo(3);
+
+            assertThat(exists(ids.get(0))).isFalse();
+            assertThat(exists(ids.get(2))).isFalse();
+            assertThat(status(ids.get(1))).isEqualTo("pending");
+            assertThat(column(ids.get(1), "last_error", String.class))
+                    .isEqualTo("java.lang.IllegalStateException: downstream unavailable");
+            // The interceptors outside the broken one still unwind.
+            assertThat(interceptorTrace.entries).containsSubsequence("second.onError", "first.onError");
+        }
+
+        @Test
+        void fatalVirtualMachineErrorsStillEscape() {
+            publisher.failures.put("test.oom", new OutOfMemoryError("simulated"));
+            append("test.oom");
+
+            assertThatThrownBy(() -> relay.runOnce()).isInstanceOf(OutOfMemoryError.class);
+        }
+    }
+
+    // ---- a retry policy that throws: the relay falls back to retrying after backoff.max ----
+
+    @TestConfiguration
+    static class BrokenPolicyConfig {
+        @Bean
+        RecordingPublisher recordingPublisher() {
+            return new RecordingPublisher();
+        }
+
+        @Bean
+        RetryPolicy brokenRetryPolicy() {
+            return (record, failure, now) -> {
+                throw new IllegalStateException("retry policy bug");
+            };
+        }
+    }
+
+    @Nested
+    @NestedTestConfiguration(EnclosingConfiguration.OVERRIDE)
+    @SpringBootTest(classes = OutboxTestApplication.class, properties = "rbac.outbox.enabled=false")
+    @Import(BrokenPolicyConfig.class)
+    class BrokenRetryPolicy {
+
+        @DynamicPropertySource
+        static void properties(DynamicPropertyRegistry registry) {
+            registerDatabase(registry);
+        }
+
+        @Autowired
+        private JsonMapper json;
+        @Autowired
+        private OutboxRelay brokenRelay;
+        @Autowired
+        private OutboxWriter brokenWriter;
+        @Autowired
+        private TenantScope brokenScope;
+        @Autowired
+        private RecordingPublisher brokenPublisher;
+        @Autowired
+        private OutboxProperties properties;
+
+        @Test
+        void aThrowingRetryPolicyFallsBackToTheMaximumBackoff() {
+            brokenPublisher.reset();
+            brokenPublisher.failures.put("test.fail", new IllegalStateException("downstream unavailable"));
+            List<UUID> ids = append(brokenScope, brokenWriter, json, tenant, "test.ok", "test.fail", "test.ok");
+
+            Instant t0 = Instant.now();
+            assertThat(brokenRelay.runOnce()).isEqualTo(3);
+            Instant t1 = Instant.now();
+
+            assertThat(exists(ids.get(0))).isFalse();
+            assertThat(exists(ids.get(2))).isFalse();
+            UUID failed = ids.get(1);
+            assertThat(status(failed)).isEqualTo("pending");
+            assertThat(column(failed, "claim_token", UUID.class)).isNull();
+            assertThat(column(failed, "last_error", String.class))
+                    .isEqualTo("java.lang.IllegalStateException: downstream unavailable");
+            Duration max = properties.backoff().max();
+            Instant next = column(failed, "next_attempt_at", OffsetDateTime.class).toInstant();
+            assertThat(next).isBetween(t0.truncatedTo(ChronoUnit.MICROS).plus(max), t1.plus(1, ChronoUnit.MICROS).plus(max));
+        }
     }
 
     // ---- in-process publishing: the relay hands events to the service's own EventHandler beans ----

@@ -6,6 +6,7 @@ spring:
       - optional:file:.env[.properties]
       - optional:file:../../.env[.properties]
       - classpath:rbac/db-defaults.yaml
+      - classpath:rbac/batch-defaults.yaml
   datasource:
     username: ${AUDIT_DB_USER:audit_app}
     password: ${AUDIT_DB_PASSWORD}
@@ -14,3 +15,8 @@ server:
 rbac:
   db:
     expected-role: audit_app
+  batch:
+    schema: audit
+    jobs:
+      partition-maintenance:
+        cron: "0 0 2 * * *"

@@ -6,6 +6,7 @@ spring:
       - optional:file:.env[.properties]
       - optional:file:../../.env[.properties]
       - classpath:rbac/db-defaults.yaml
+      - classpath:rbac/batch-defaults.yaml
   datasource:
     username: ${AUTHZ_DB_USER:authz_app}
     password: ${AUTHZ_DB_PASSWORD}
@@ -14,3 +15,11 @@ server:
 rbac:
   db:
     expected-role: authz_app
+  outbox:
+    schema: authz
+    publisher: log
+  batch:
+    schema: authz
+    jobs:
+      partition-maintenance:
+        cron: "0 0 2 * * *"

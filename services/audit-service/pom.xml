@@ -22,6 +22,10 @@
 			<artifactId>lib-db</artifactId>
 		</dependency>
 		<dependency>
+			<groupId>com.rbac_platform</groupId>
+			<artifactId>lib-batch</artifactId>
+		</dependency>
+		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc</artifactId>
 		</dependency>

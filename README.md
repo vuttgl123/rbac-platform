@@ -6,15 +6,84 @@ Multi-tenant RBAC platform: three Spring Boot services on one PostgreSQL databas
 
 | Path | Purpose |
 | --- | --- |
-| `libs/lib-core` | Logging (`logback-spring.xml`, request ids), `RequestLoggingFilter`, error responses carrying the request id |
+| `libs/lib-core` | Logging (`logback-spring.xml`, request ids), `RequestLoggingFilter`, error responses carrying the request id, the event contracts (`EventHandler`, `EventEnvelope`, `EventDispatcher`) |
 | `libs/lib-db` | Shared data source defaults, `TenantScope`, startup check that the service connects as its own non-bypass role |
-| `db-migrations` | Flyway migrations `V1`-`V11`, the Flyway plugin setup, DB tests with embedded Postgres (also a test-jar) |
+| `libs/lib-outbox` | Transactional outbox: `OutboxWriter` appends events in the caller's tenant transaction, `OutboxRelay` publishes them asynchronously and deletes them once delivered |
+| `libs/lib-batch` | Spring Batch with a per-service job repository, `JobLaunchService`, slot-guarded cron scheduling (`ScheduledJobRunner`), tenant fan-out, `PartitionMaintenanceJob` |
+| `db-migrations` | Flyway migrations `V1`-`V13`, the Flyway plugin setup, DB tests with embedded Postgres (also a test-jar) |
 | `test-support` | Test-only helpers (`AppDatabase`, ...) used by the other modules |
 | `services/identity-service` | Identity service, port 8081, database role `identity_app` |
 | `services/authz-service` | Authorization service, port 8082, database role `authz_app` |
 | `services/audit-service` | Audit service, port 8083, database role `audit_app` |
 
 Services depend on the libs, never the reverse. No service runs migrations.
+
+## Async
+
+Work is split by how it must behave, not by who calls it.
+
+| Kind | Runs | Mechanism | Use it for |
+| --- | --- | --- | --- |
+| CRUD | In the request, in one tenant transaction (`TenantScope.call`) | `JdbcClient` and hand-written SQL | Changes the caller waits for |
+| Outbox | After commit, on the relay's own thread | `OutboxWriter.append` in the same transaction as the change; `OutboxRelay` publishes and deletes the row | Side effects of a change (events, notifications) that must not be lost or slow the request |
+| Batch | On a cron schedule or on demand | A `Job` bean, launched by `ScheduledJobRunner` or `JobLaunchService.launch` | Periodic or bulk work, such as partition maintenance |
+
+identity-service and authz-service have an outbox (`identity.outbox`, `authz.outbox`). authz-service and audit-service run
+batch jobs, with the job repository in their own schema (`authz.batch_*`, `audit.batch_*`). Both run `partition-maintenance`
+daily at 02:00 UTC.
+
+### `rbac.outbox.*` (lib-outbox)
+
+Active only when `rbac.outbox.schema` is set.
+
+| Property | Default | Meaning |
+| --- | --- | --- |
+| `schema` | none | Schema that owns the service's `outbox` table; must match `[a-z_][a-z0-9_]*` |
+| `enabled` | `true` | Whether this instance runs the relay |
+| `publisher` | `log` | `log` writes one INFO line per event; `in-process` delivers to the service's own `EventHandler` beans |
+| `batch-size` | `100` | Rows claimed per relay pass (1-1000) |
+| `poll-interval` | `500ms` | Longest wait between passes when no writer wakes the relay |
+| `lease` | `60s` | How long a claimed row is held before another relay may claim it again |
+| `max-attempts` | `10` | Deliveries tried before a row is buried |
+| `backoff.initial` / `backoff.max` | `1s` / `5m` | Delay after the first failure, and its ceiling as failures accumulate |
+
+### `rbac.batch.*` (lib-batch)
+
+Active only when `rbac.batch.schema` is set. A service that sets it must also import the batch defaults, otherwise startup
+fails:
+
+```yaml
+spring:
+  config:
+    import:
+      - classpath:rbac/batch-defaults.yaml
+```
+
+| Property | Default | Meaning |
+| --- | --- | --- |
+| `schema` | none | Schema that holds the job repository and schedule slots; must match `[a-z_][a-z0-9_]*` |
+| `scheduler-pool-size` | `2` | Threads that fire scheduled jobs |
+| `jobs.<name>.cron` | none | Spring cron expression (six fields, seconds first), evaluated in UTC; a job without one is only launched on demand |
+| `jobs.<name>.enabled` | `true` | Whether this job is scheduled |
+
+### `rbac.events.*` (lib-core)
+
+| Property | Default | Meaning |
+| --- | --- | --- |
+| `unhandled` | `ignore` | What the dispatcher does with an event no `EventHandler` claims: `ignore` or `fail` |
+
+### Adding a handler
+
+Declare one `EventHandler` bean. It names its event types in `eventTypes()` (or `EventHandler.ANY`) and processes them in
+`handle`; nothing dispatches on the type. Delivery is at-least-once, so make it idempotent on `EventEnvelope.id()`. Throw
+`NonRetryableEventException` to stop retries. Set `rbac.outbox.publisher: in-process` for the service's own handlers to
+receive its outbox events.
+
+### Adding a job
+
+Declare a `Job` bean (see `BatchJobsConfig` in authz-service) and add `rbac.batch.jobs.<name>.cron` for it. Launch it on
+demand with `JobLaunchService.launch("<name>", Map.of("run", UUID.randomUUID().toString()))`. The job runs on the caller's
+thread and returns the finished execution.
 
 ## Running a service locally
 
@@ -58,7 +127,9 @@ set -a; source .env; set +a
 ```
 
 The Flyway plugin reads environment variables, hence the export. Supabase currently gets its migrations through the
-SQL Editor (the network blocks the database port); `V1`-`V11` are applied by hand there.
+SQL Editor (the network blocks the database port); `V1`-`V10` are applied by hand there. `V11`-`V13` (service roles, outbox,
+batch repository and partition maintenance functions) are not applied to Supabase yet, so the outbox and batch features
+need them before a service with these settings can run against it.
 
 New roles start `NOLOGIN`. `scripts/db/bootstrap_login_roles.sql` enables `rbac_app` / `rbac_admin` and
 `scripts/db/bootstrap_service_login_roles.sql` enables the three service roles; both take SCRAM verifiers computed by

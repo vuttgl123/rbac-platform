@@ -2,14 +2,21 @@ package com.rbac_platform.identity;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
 
+import com.rbac_platform.lib.db.TenantScope;
+import com.rbac_platform.lib.outbox.OutboxMessage;
+import com.rbac_platform.lib.outbox.OutboxWriter;
 import com.rbac_platform.testsupport.AppDatabase;
 import com.rbac_platform.testsupport.MigratedDatabase;
+import com.rbac_platform.testsupport.Sql;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.Base64;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -21,6 +28,7 @@ import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import tools.jackson.databind.json.JsonMapper;
 
 @ExtendWith(OutputCaptureExtension.class)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -35,6 +43,15 @@ class IdentityServiceApplicationTest {
 
     @Autowired
     private JdbcClient jdbc;
+
+    @Autowired
+    private TenantScope tenantScope;
+
+    @Autowired
+    private OutboxWriter outboxWriter;
+
+    @Autowired
+    private JsonMapper json;
 
     @LocalServerPort
     private int port;
@@ -95,5 +112,24 @@ class IdentityServiceApplicationTest {
                     }
                     assertThat(cause.getMessage()).contains("expects database role 'identity_app'");
                 });
+    }
+
+    @Test
+    void outboxEventIsRelayedAndRemoved(CapturedOutput output) {
+        UUID tenant = MigratedDatabase.get().insertTenant();
+        String aggregateId = UUID.randomUUID().toString();
+
+        tenantScope.call(tenant, () -> {
+            outboxWriter.append(OutboxMessage.of("probe", aggregateId, "probe.happened", json.readTree("{\"id\":\"" + aggregateId + "\"}")));
+            return null;
+        });
+
+        // The shared database may hold other tests' rows, so only this message's row is checked.
+        await().atMost(Duration.ofSeconds(3)).untilAsserted(() -> {
+            long rows = MigratedDatabase.get().inTx(null, null, c -> Sql.count(c,
+                    "select count(*) from identity.outbox where aggregate_id = ?", aggregateId));
+            assertThat(rows).isZero();
+            assertThat(output.getAll()).contains("probe/" + aggregateId);
+        });
     }
 }

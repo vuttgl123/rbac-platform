@@ -14,3 +14,6 @@ server:
 rbac:
   db:
     expected-role: identity_app
+  outbox:
+    schema: identity
+    publisher: log

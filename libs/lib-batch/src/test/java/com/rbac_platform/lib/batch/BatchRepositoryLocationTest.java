@@ -99,9 +99,12 @@ class BatchRepositoryLocationTest {
     }
 
     @Test
-    void jobRepositoryCreatesAtReadCommitted() throws Exception {
+    void jobRepositoryCreatesAtTheConnectionsDefaultIsolation() throws Exception {
         // Batch 6 creates instances and executions at SERIALIZABLE, where two concurrent launches can fail each other
-        // with 40001. The schedule slot and JOB_INST_UN already keep out duplicates, so read committed is enough.
+        // with 40001. The schedule slot and JOB_INST_UN already keep out duplicates, so Postgres's read committed is
+        // enough. It must be DEFAULT rather than READ_COMMITTED: any explicit level makes Spring ask the driver for the
+        // current one (a SHOW round trip in pgjdbc) and may set it on the session, which under Supavisor's transaction
+        // pooling would leak to whichever client gets that backend next.
         TransactionInterceptor transactions = Arrays.stream(((Advised) repository).getAdvisors())
                 .map(Advisor::getAdvice)
                 .filter(TransactionInterceptor.class::isInstance)
@@ -114,7 +117,7 @@ class BatchRepositoryLocationTest {
             assertThat(transactions.getTransactionAttributeSource().getTransactionAttribute(create, JobRepository.class))
                     .as(create.getName())
                     .extracting(TransactionDefinition::getIsolationLevel)
-                    .isEqualTo(TransactionDefinition.ISOLATION_READ_COMMITTED);
+                    .isEqualTo(TransactionDefinition.ISOLATION_DEFAULT);
         }
     }
 

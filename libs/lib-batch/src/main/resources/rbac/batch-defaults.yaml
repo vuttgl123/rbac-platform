@@ -9,8 +9,11 @@ spring:
       initialize-schema: never
       # Batch defaults to SERIALIZABLE here, where concurrent launches (two jobs on one cron, an on-demand launch
       # during a fire) can fail each other with 40001 and lose a scheduled run. Duplicates are already kept out by
-      # batch_schedule_slot's primary key and by JOB_INST_UN.
-      isolation-level-for-create: read_committed
+      # batch_schedule_slot's primary key and by JOB_INST_UN. DEFAULT is the server's read committed without naming
+      # it: an explicit level makes Spring read the connection's level first (a SHOW round trip in pgjdbc) and, when
+      # it differs, set it and later reset it with session-level statements, which under Supavisor's transaction
+      # pooling can land on, and stay on, a backend other clients share.
+      isolation-level-for-create: default
     job:
       # Jobs run when they are scheduled (rbac.batch.jobs) or launched, never at startup.
       enabled: false

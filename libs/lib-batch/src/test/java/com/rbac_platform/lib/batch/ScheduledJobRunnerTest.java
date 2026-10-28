@@ -20,6 +20,7 @@ import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -250,6 +251,70 @@ class ScheduledJobRunnerTest {
                         .hasMessageContaining(misconfiguration[1]);
             });
         }
+    }
+
+    /** A runner for one job, {@code slow}, firing every second; every slot is free. */
+    static ScheduledJobRunner everySecond(JobLaunchService launcher) {
+        when(launcher.jobNames()).thenReturn(Set.of("slow"));
+        ScheduleSlots slots = mock(ScheduleSlots.class);
+        when(slots.claim(any(), any(), any())).thenReturn(true);
+        BatchProperties properties = new BatchProperties("identity", 2,
+                Map.of("slow", new BatchProperties.JobSchedule(true, "* * * * * *")));
+        return new ScheduledJobRunner(properties, launcher, slots, "test@host:1");
+    }
+
+    @Test
+    void schedulingStartsWithTheLifecycleNotWhenTheBeansExist() throws Exception {
+        AtomicInteger launches = new AtomicInteger();
+        JobLaunchService launcher = mock(JobLaunchService.class);
+        when(launcher.launch(eq("slow"), anyMap())).thenAnswer(invocation -> {
+            launches.incrementAndGet();
+            return mock(JobExecution.class);
+        });
+        ScheduledJobRunner runner = everySecond(launcher);
+
+        runner.afterSingletonsInstantiated();
+        Thread.sleep(1500);
+        assertThat(launches).as("nothing fires before start").hasValue(0);
+        assertThat(runner.isRunning()).isFalse();
+        assertThat(runner.isAutoStartup()).isTrue();
+
+        runner.start();
+        try {
+            assertThat(runner.isRunning()).isTrue();
+            await().atMost(Duration.ofSeconds(3)).until(() -> launches.get() >= 1);
+        } finally {
+            runner.stop();
+        }
+        assertThat(runner.isRunning()).isFalse();
+    }
+
+    @Test
+    void stopWithACallbackReturnsAtOnceAndCallsBackWhenTheRunningJobFinishes() throws Exception {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicBoolean finished = new AtomicBoolean();
+        JobLaunchService launcher = mock(JobLaunchService.class);
+        when(launcher.launch(eq("slow"), anyMap())).thenAnswer(invocation -> {
+            started.countDown();
+            finished.set(release.await(10, TimeUnit.SECONDS));
+            return mock(JobExecution.class);
+        });
+        ScheduledJobRunner runner = everySecond(launcher);
+        runner.afterSingletonsInstantiated();
+        runner.start();
+        assertThat(started.await(3, TimeUnit.SECONDS)).isTrue();
+
+        CountDownLatch stopped = new CountDownLatch(1);
+        long calling = System.nanoTime();
+        runner.stop(stopped::countDown);
+        // The lifecycle processor stops every bean of the phase this way, then waits for all callbacks at once.
+        assertThat(Duration.ofNanos(System.nanoTime() - calling)).isLessThan(Duration.ofMillis(500));
+        assertThat(stopped.await(300, TimeUnit.MILLISECONDS)).as("callback waits for the job").isFalse();
+
+        release.countDown();
+        assertThat(stopped.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(finished).isTrue();
     }
 
     @Test

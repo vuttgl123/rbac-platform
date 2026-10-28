@@ -17,6 +17,12 @@ import org.springframework.transaction.TransactionDefinition;
  *
  * <p>A job builds one per step, {@code new TenantScopedTransactionManager(dataSource)}. It must never be a bean:
  * a {@code PlatformTransactionManager} bean would replace Boot's for the whole service.
+ *
+ * <p>Only what runs inside the step's transactions sees the tenant. A {@code JdbcCursorItemReader} takes its
+ * connection when the step opens it, before and outside any chunk transaction, so its query runs with no tenant and
+ * row-level security silently returns zero rows: the step "succeeds" having read nothing. Read with a paging reader
+ * ({@code JdbcPagingItemReader}), which queries each page inside the chunk's transaction, or with
+ * {@code JdbcClient} calls made from the step's own reader, processor or writer.
  */
 public class TenantScopedTransactionManager extends DataSourceTransactionManager {
 

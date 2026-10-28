@@ -43,7 +43,7 @@ Active only when `rbac.outbox.schema` is set.
 | `publisher` | `log` | `log` writes one INFO line per event; `in-process` delivers to the service's own `EventHandler` beans |
 | `batch-size` | `100` | Rows claimed per relay pass (1-1000) |
 | `poll-interval` | `500ms` | Longest wait between passes when no writer wakes the relay |
-| `lease` | `60s` | How long a claimed row is held before another relay may claim it again |
+| `lease` | `60s` | How long a claimed row is held before another relay may claim it again (at most `1h`) |
 | `max-attempts` | `10` | Deliveries tried before a row is buried |
 | `backoff.initial` / `backoff.max` | `1s` / `5m` | Delay after the first failure, and its ceiling as failures accumulate |
 
@@ -84,6 +84,25 @@ receive its outbox events.
 Declare a `Job` bean (see `BatchJobsConfig` in authz-service) and add `rbac.batch.jobs.<name>.cron` for it. Launch it on
 demand with `JobLaunchService.launch("<name>", Map.of("run", UUID.randomUUID().toString()))`. The job runs on the caller's
 thread and returns the finished execution.
+
+A tenant fan-out worker step (`TenantPartitioner` with a `TenantScopedTransactionManager`) sees its tenant only inside
+its chunk transactions. Read with `JdbcPagingItemReader`, not `JdbcCursorItemReader`: a cursor opens its connection
+outside the transaction and silently reads zero rows.
+
+### Scheduling and shutdown guarantees
+
+- A scheduled run is at most once. Each fire first claims its `(job, scheduledAt)` slot in `<schema>.batch_schedule_slot`,
+  so no two instances run it, and the slot stays claimed whatever happens next. If the launch fails after the claim (the
+  job repository is unreachable, say), that run is lost: it is logged at ERROR (`Scheduled job <name> for <time> could
+  not run`) and must be launched by hand with `JobLaunchService.launch`. A run that starts and fails is not retried by
+  the scheduler either; `JobLaunchService.restart(executionId)` resumes it.
+- Two concurrent `restart()` calls on the same execution are not guarded yet; make sure only one operator restarts it.
+- On shutdown the outbox relay and the scheduler stop in the same lifecycle phase, side by side. The relay finishes its
+  batch in flight, waiting at most `lease` or `spring.lifecycle.timeout-per-shutdown-phase` (Boot's default `30s`),
+  whichever is shorter; whatever it did not acknowledge is claimed again once the lease expires. The scheduler fires
+  nothing more and waits up to 25 s for running jobs, so keep `spring.lifecycle.timeout-per-shutdown-phase` above `25s`:
+  past it the context closes the data source under a running job, which is then left `STARTED` until it is recovered
+  (`JobLaunchService.recover`).
 
 ## Running a service locally
 

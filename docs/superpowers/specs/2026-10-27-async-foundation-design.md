@@ -93,11 +93,12 @@ Hàm `util.create_outbox(p_schema text, p_role regrole)` chỉ owner mới gọi
   - Vì vậy writer không dùng được `RETURNING` hay `ON CONFLICT`, và `id` do DB sinh.
 - Tiến trình nền dùng ba hàm `SECURITY DEFINER` (owner `rbac_owner`, chạy dưới policy `owner_all`). EXECUTE thu hồi khỏi PUBLIC, chỉ cấp cho đúng role:
   - `<schema>.outbox_claim(p_limit int, p_lease interval, p_token uuid) RETURNS SETOF <schema>.outbox`
-    - Chọn các dòng `pending` có `next_attempt_at <= now()`, sắp theo `next_attempt_at, id`, bằng `FOR UPDATE SKIP LOCKED`.
+    - Chọn các dòng `pending` có `next_attempt_at <= now()`, sắp theo `next_attempt_at, id`, bằng `FOR UPDATE SKIP LOCKED`, trong một CTE `MATERIALIZED` (không dùng `WHERE id IN (subquery LIMIT)`: planner có thể quét lại subquery theo từng dòng và lấy quá `p_limit`).
     - Trong cùng một câu lệnh, đặt `attempts + 1`, `next_attempt_at = now() + p_lease`, `claim_token = p_token`.
+    - `p_lease` phải lớn hơn 0 và không quá 1 giờ.
     - Commit ngay sau đó.
   - `<schema>.outbox_complete(p_token uuid, p_ids uuid[])` xóa các dòng đã gửi xong.
-  - `<schema>.outbox_reschedule(p_token uuid, p_id uuid, p_error text, p_next_attempt_at timestamptz, p_dead boolean)` hẹn lần thử sau hoặc chuyển sang `dead`.
+  - `<schema>.outbox_reschedule_many(p_token uuid, p_ids uuid[], p_errors text[], p_next timestamptz[], p_dead boolean[]) RETURNS int` hẹn lần thử sau hoặc chuyển sang `dead` cho cả lô trong một câu lệnh (các mảng song song, cùng độ dài).
     - Chỉ có tác dụng khi `claim_token` còn khớp. Một instance đã hết lease thì không ghi đè được kết quả của instance đã lấy lại việc.
 - Vận hành viên (`rbac_admin`) có hai hàm `SECURITY DEFINER` cho mỗi outbox. *(quyết định của tôi: V12 không sửa được về sau, nên phải có ngay)*
   - `<schema>.outbox_dead(p_limit int)` xem sự kiện hỏng của mọi tenant.
@@ -122,7 +123,7 @@ Mỗi vòng lặp dùng **lease (giữ chỗ)**, không giữ transaction trong 
    - còn lại thì gọi `OutboxPublisher`.
 3. **Transaction ngắn:**
    - xóa những sự kiện thành công bằng một lần gọi `outbox_complete`;
-   - với sự kiện lỗi, hỏi `RetryPolicy` rồi gọi `outbox_reschedule`;
+   - với sự kiện lỗi, hỏi `RetryPolicy` rồi gọi `outbox_reschedule_many` một lần cho cả lô;
    - commit.
 
 Các tình huống được xử lý:
@@ -259,7 +260,7 @@ Thứ tự trong pom cha: `lib-core`, `lib-db`, `lib-outbox`, `lib-batch`, `db-m
 - Gọi `append` ngoài transaction thì báo lỗi.
 - Gửi thành công thì dòng bị xóa. Lỗi thì `next_attempt_at` lùi theo backoff. Quá `max-attempts` hoặc gặp `NonRetryableEventException` thì chuyển sang `dead`.
 - Service chết sau khi lấy việc thì sự kiện được lấy lại khi hết lease, và `attempts` vẫn tăng mỗi lần lấy.
-- `outbox_reschedule` hoặc `outbox_complete` với token cũ (đã hết lease, việc đã bị instance khác lấy lại) không làm thay đổi dòng nào.
+- `outbox_reschedule_many` hoặc `outbox_complete` với token cũ (đã hết lease, việc đã bị instance khác lấy lại) không làm thay đổi dòng nào.
 - Handler gọi được `TenantScope.call` và ghi được dữ liệu tenant.
 - `rbac_admin` xem và đưa lại được sự kiện `dead` qua hai hàm vận hành. Role service thì không.
 - Commit xong thì relay chạy ngay, không chờ hết `poll-interval`.

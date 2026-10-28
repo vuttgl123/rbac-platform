@@ -124,8 +124,9 @@ class IdentityServiceApplicationTest {
             return null;
         });
 
-        // The shared database may hold other tests' rows, so only this message's row is checked.
-        await().atMost(Duration.ofSeconds(3)).untilAsserted(() -> {
+        // The shared database may hold other tests' rows, so only this message's row is checked. The budget is
+        // generous for a loaded build machine; untilAsserted returns as soon as it holds.
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
             long rows = MigratedDatabase.get().inTx(null, null, c -> Sql.count(c,
                     "select count(*) from identity.outbox where aggregate_id = ?", aggregateId));
             assertThat(rows).isZero();

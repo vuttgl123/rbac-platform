@@ -473,6 +473,45 @@ class OutboxRelayTest {
         }
 
         @Test
+        void anInterruptedHandlerDoesNotPoisonTheRestOfItsBatch() throws InterruptedException {
+            // One handler throws InterruptedException; another follows the usual idiom of restoring the flag and
+            // throwing something unchecked. Each is followed by an event whose handler would fail at once on a
+            // blocking call if the flag were still set. Separate appends a few ms apart keep that order in the ids.
+            publisher.failures.put("test.interrupted", new InterruptedException("handler interrupted"));
+            publisher.failures.put("test.reinterrupts", new IllegalStateException("interrupted, gave up"));
+            Map<UUID, Boolean> interruptedOnEntry = new ConcurrentHashMap<>();
+            publisher.probe = event -> {
+                interruptedOnEntry.put(event.id(), Thread.currentThread().isInterrupted());
+                if (event.eventType().equals("test.reinterrupts")) {
+                    Thread.currentThread().interrupt();
+                }
+            };
+            List<UUID> ids = new ArrayList<>();
+            for (String type : List.of("test.interrupted", "test.ok", "test.reinterrupts", "test.ok")) {
+                ids.addAll(append(type));
+                Thread.sleep(5);
+            }
+
+            try {
+                assertThat(relay.runOnce()).isEqualTo(4);
+                assertThat(Thread.currentThread().isInterrupted()).as("flag left on the relay thread").isFalse();
+            } finally {
+                Thread.interrupted();
+            }
+
+            assertThat(publisher.seenIds()).containsExactlyElementsOf(ids);
+            assertThat(interruptedOnEntry).containsOnlyKeys(ids).doesNotContainValue(true);
+            assertThat(exists(ids.get(1))).as("delivered and acknowledged").isFalse();
+            assertThat(exists(ids.get(3))).as("delivered and acknowledged").isFalse();
+            assertThat(column(ids.get(0), "last_error", String.class))
+                    .isEqualTo("java.lang.InterruptedException: handler interrupted");
+            assertThat(column(ids.get(2), "last_error", String.class))
+                    .isEqualTo("java.lang.IllegalStateException: interrupted, gave up");
+            assertThat(column(ids.get(0), "claim_token", UUID.class)).isNull();
+            assertThat(column(ids.get(2), "claim_token", UUID.class)).isNull();
+        }
+
+        @Test
         void fatalVirtualMachineErrorsStillEscape() {
             publisher.failures.put("test.oom", new OutOfMemoryError("simulated"));
             append("test.oom");
@@ -764,6 +803,56 @@ class OutboxRelayTest {
             assertThat(exists(id)).as("the batch in flight was acknowledged").isFalse();
             assertThat(liveRelay.isRunning()).isFalse();
             await().atMost(Duration.ofSeconds(2)).until(() -> relayThread() == null);
+        }
+    }
+
+    /** The lease (60 s by default) outlasts the shutdown phase: stop must not wait past the phase. */
+    @Nested
+    @NestedTestConfiguration(EnclosingConfiguration.OVERRIDE)
+    @SpringBootTest(classes = OutboxTestApplication.class, properties = {"rbac.outbox.enabled=true",
+            "rbac.outbox.poll-interval=30s", "spring.lifecycle.timeout-per-shutdown-phase=1s"})
+    @Import(LiveConfig.class)
+    @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_EACH_TEST_METHOD)
+    class ShortShutdownPhase {
+
+        @DynamicPropertySource
+        static void properties(DynamicPropertyRegistry registry) {
+            registerDatabase(registry);
+        }
+
+        @Autowired
+        private JsonMapper json;
+
+        @Autowired
+        private OutboxRelay shortRelay;
+        @Autowired
+        private OutboxWriter shortWriter;
+        @Autowired
+        private TenantScope shortScope;
+        @Autowired
+        private RecordingPublisher shortPublisher;
+        @Autowired
+        private Trace timeline;
+
+        @Test
+        void stopWaitsNoLongerThanTheShutdownPhase() throws InterruptedException {
+            Gate gate = new Gate(timeline);
+            shortPublisher.gates.put("test.block", gate);
+            appendForLiveRelay(shortScope, shortWriter, json, tenant, "test.block");
+            assertThat(gate.entered.await(5, TimeUnit.SECONDS)).as("publish started").isTrue();
+
+            try {
+                CountDownLatch stopped = new CountDownLatch(1);
+                long t0 = System.nanoTime();
+                shortRelay.stop(stopped::countDown);
+
+                assertThat(stopped.await(5, TimeUnit.SECONDS)).as("callback within the 1 s phase, not the lease").isTrue();
+                assertThat(Duration.ofNanos(System.nanoTime() - t0)).isGreaterThanOrEqualTo(Duration.ofMillis(900));
+                assertThat(timeline.entries).as("the publish is still held").isEmpty();
+            } finally {
+                gate.release.countDown();
+            }
+            await().atMost(Duration.ofSeconds(5)).until(() -> !shortRelay.isRunning());
         }
     }
 

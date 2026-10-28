@@ -12,6 +12,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -176,6 +177,29 @@ class OutboxSchemaTest {
                 .containsExactly(older);
     }
 
+    /**
+     * Statistics taken while the queue was all but empty (its normal state) let the planner turn an
+     * {@code id IN (... LIMIT n FOR UPDATE SKIP LOCKED)} claim into a semi join that rescans the LIMIT subquery per
+     * row, skipping the rows the statement already updated and so leasing the whole backlog. The claim must take at
+     * most its limit whatever the statistics say.
+     */
+    @Test
+    void claimNeverExceedsItsLimitWithStaleStatistics() {
+        String insertDue = "insert into identity.outbox (tenant_id, aggregate_type, aggregate_id, event_type, payload) "
+                + "select gen_random_uuid(), 'user', i::text, 'bulk', '{}' from generate_series(1, ?) i";
+        db.inTx(null, null, c -> {
+            exec(c, insertDue, 1);
+            exec(c, "analyze identity.outbox");
+            exec(c, "delete from identity.outbox");
+            exec(c, insertDue, 50);
+            return null;
+        });
+        UUID tok = UUID.randomUUID();
+
+        assertThat(db.<List<UUID>>inTx(null, null, c -> claim(c, 5, "30 seconds", tok))).hasSize(5);
+        assertThat(rows("select count(*) from identity.outbox where claim_token = ?", tok)).isEqualTo(5);
+    }
+
     @Test
     void concurrentClaimsNeverReturnTheSameRow() throws Exception {
         UUID a = db.insertTenant();
@@ -209,6 +233,18 @@ class OutboxSchemaTest {
         }
     }
 
+    /** outbox_reschedule_many as the relay calls it: one row per failure, as parallel arrays. */
+    private static int rescheduleMany(Connection c, UUID token, UUID[] ids, String[] errors, OffsetDateTime[] next,
+                                      Boolean[] dead) throws SQLException {
+        return one(c, Integer.class, "select identity.outbox_reschedule_many(?, ?, ?, ?, ?)", token,
+                c.createArrayOf("uuid", ids), c.createArrayOf("text", errors),
+                c.createArrayOf("timestamptz", next), c.createArrayOf("boolean", dead));
+    }
+
+    private int rescheduleAsRelay(UUID token, UUID[] ids, String[] errors, OffsetDateTime[] next, Boolean[] dead) {
+        return db.<Integer>inTx("identity_app", null, c -> rescheduleMany(c, token, ids, errors, next, dead));
+    }
+
     @Test
     void completeAndRescheduleRequireTheCurrentToken() {
         UUID a = db.insertTenant();
@@ -221,18 +257,18 @@ class OutboxSchemaTest {
         db.inTx("identity_app", null, c -> {
             assertThat(one(c, Integer.class, "select identity.outbox_complete(?, ?)", stale,
                     c.createArrayOf("uuid", new UUID[] {id}))).isZero();
-            assertThat(one(c, Boolean.class, "select identity.outbox_reschedule(?, ?, 'boom', null, false)",
-                    stale, id)).isFalse();
+            assertThat(rescheduleMany(c, stale, new UUID[] {id}, new String[] {"boom"}, new OffsetDateTime[] {null},
+                    new Boolean[] {false})).isZero();
             return null;
         });
-        assertThat(rows("select count(*) from identity.outbox where id = ?", id))
-                .isEqualTo(1);
+        db.inTx(null, null, c -> {
+            assertThat(one(c, UUID.class, "select claim_token from identity.outbox where id = ?", id)).isEqualTo(tok);
+            assertThat(one(c, String.class, "select last_error from identity.outbox where id = ?", id)).isNull();
+            return null;
+        });
 
-        db.inTx("identity_app", null, c -> {
-            assertThat(one(c, Boolean.class, "select identity.outbox_reschedule(?, ?, 'boom', null, false)",
-                    tok, id)).isTrue();
-            return null;
-        });
+        assertThat(rescheduleAsRelay(tok, new UUID[] {id}, new String[] {"boom"}, new OffsetDateTime[] {null},
+                new Boolean[] {false})).isEqualTo(1);
         db.inTx(null, null, c -> {
             assertThat(one(c, String.class, "select status from identity.outbox where id = ?", id)).isEqualTo("pending");
             assertThat(one(c, UUID.class, "select claim_token from identity.outbox where id = ?", id)).isNull();
@@ -251,6 +287,59 @@ class OutboxSchemaTest {
     }
 
     @Test
+    void rescheduleManyAppliesRetriesAndBurialsInOneCall() {
+        UUID a = db.insertTenant();
+        publish(a, "retry-later");
+        publish(a, "bury");
+        publish(a, "retry-now");
+        publish(a, "not-mine");
+        UUID later = idOf("retry-later");
+        UUID bury = idOf("bury");
+        UUID now = idOf("retry-now");
+        UUID notMine = idOf("not-mine");
+        UUID tok = UUID.randomUUID();
+        assertThat(claimAsRelay(10, "30 seconds", tok)).hasSize(4);
+        // Another relay took this one over after the lease expired: its token is no longer ours.
+        UUID other = UUID.randomUUID();
+        db.inTx(null, null, c -> exec(c, "update identity.outbox set claim_token = ? where id = ?", other, notMine));
+        OffsetDateTime at = OffsetDateTime.parse("2030-01-01T00:00:00Z");
+
+        assertThat(rescheduleAsRelay(tok, new UUID[] {later, bury, now, notMine},
+                new String[] {"later", "x".repeat(3000), "now", "stale"},
+                new OffsetDateTime[] {at, null, null, at},
+                new Boolean[] {false, true, false, true})).isEqualTo(3);
+
+        db.inTx(null, null, c -> {
+            assertThat(one(c, String.class, "select status || ' ' || last_error || ' ' || (next_attempt_at = ?) "
+                    + "|| ' ' || (claim_token is null) from identity.outbox where id = ?", at, later))
+                    .isEqualTo("pending later true true");
+            assertThat(one(c, String.class, "select status || ' ' || length(last_error) || ' ' || (claim_token is null) "
+                    + "from identity.outbox where id = ?", bury)).isEqualTo("dead 2000 true");
+            assertThat(one(c, Boolean.class, "select status = 'pending' and last_error = 'now' and claim_token is null "
+                    + "and next_attempt_at <= now() from identity.outbox where id = ?", now)).isTrue();
+            assertThat(one(c, String.class, "select status || ' ' || coalesce(last_error, '-') || ' ' || claim_token "
+                    + "from identity.outbox where id = ?", notMine)).isEqualTo("pending - " + other);
+            return null;
+        });
+        // Only the row released for an immediate retry is due again; the buried one never is.
+        assertThat(claimAsRelay(10, "30 seconds", UUID.randomUUID())).containsExactly(now);
+    }
+
+    @Test
+    void rescheduleManyRejectsArraysOfDifferentLengths() {
+        UUID tok = UUID.randomUUID();
+        UUID id = UUID.randomUUID();
+        assertThat(sqlState(() -> rescheduleAsRelay(tok, new UUID[] {id}, new String[] {"a", "b"},
+                new OffsetDateTime[] {null}, new Boolean[] {false}))).isEqualTo(INVALID_PARAMETER_VALUE);
+        assertThat(sqlState(() -> rescheduleAsRelay(tok, new UUID[] {id}, new String[] {"a"},
+                new OffsetDateTime[] {}, new Boolean[] {false}))).isEqualTo(INVALID_PARAMETER_VALUE);
+        assertThat(sqlState(() -> rescheduleAsRelay(tok, new UUID[] {id}, new String[] {"a"},
+                new OffsetDateTime[] {null}, new Boolean[] {}))).isEqualTo(INVALID_PARAMETER_VALUE);
+        assertThat(rescheduleAsRelay(tok, new UUID[] {}, new String[] {}, new OffsetDateTime[] {}, new Boolean[] {}))
+                .isZero();
+    }
+
+    @Test
     void rescheduleCanBuryAndAdminCanListAndRequeue() {
         UUID a = db.insertTenant();
         publish(a, "e");
@@ -258,8 +347,8 @@ class OutboxSchemaTest {
         UUID tok = UUID.randomUUID();
         claimAsRelay(10, "30 seconds", tok);
 
-        assertThat(db.<Boolean>inTx("identity_app", null, c -> one(c, Boolean.class,
-                "select identity.outbox_reschedule(?, ?, ?, null, true)", tok, id, "x".repeat(3000)))).isTrue();
+        assertThat(rescheduleAsRelay(tok, new UUID[] {id}, new String[] {"x".repeat(3000)}, new OffsetDateTime[] {null},
+                new Boolean[] {true})).isEqualTo(1);
         db.inTx(null, null, c -> {
             assertThat(one(c, String.class, "select status from identity.outbox where id = ?", id)).isEqualTo("dead");
             assertThat(one(c, Integer.class, "select length(last_error) from identity.outbox where id = ?", id))
@@ -295,8 +384,12 @@ class OutboxSchemaTest {
             assertThat(sqlState(() -> db.inTx("identity_app", null, c -> claim(c, limit, "30 seconds", tok))))
                     .as("limit " + limit).isEqualTo(INVALID_PARAMETER_VALUE);
         }
-        assertThat(sqlState(() -> db.inTx("identity_app", null, c -> claim(c, 10, "0 seconds", tok))))
-                .as("zero lease").isEqualTo(INVALID_PARAMETER_VALUE);
+        // The lease is positive and at most an hour: a relay that holds rows longer has hung, not worked.
+        for (String lease : new String[] {"0 seconds", "-1 second", "1 hour 1 second", "1 day"}) {
+            assertThat(sqlState(() -> db.inTx("identity_app", null, c -> claim(c, 10, lease, tok))))
+                    .as("lease " + lease).isEqualTo(INVALID_PARAMETER_VALUE);
+        }
+        assertThat(claimAsRelay(10, "1 hour", tok)).as("an hour is allowed").isEmpty();
         assertThat(sqlState(() -> claimAsRelay(10, "30 seconds", null)))
                 .as("null token").isEqualTo(INVALID_PARAMETER_VALUE);
         for (int limit : new int[] {0, 1001}) {
@@ -350,6 +443,30 @@ class OutboxSchemaTest {
             assertThat(plan).contains("outbox_pending_idx");
         } finally {
             emptyOutboxes();
+        }
+    }
+
+    @Test
+    void everyOutboxFunctionIsADefinerWithAPinnedSearchPathAndNoPublicExecute() {
+        for (String s : List.of("identity", "authz")) {
+            List<String> functions = db.inTx(null, null, c -> {
+                List<String> out = new ArrayList<>();
+                try (PreparedStatement ps = c.prepareStatement("select p.proname || ' ' || p.prosecdef || ' ' "
+                        + "|| p.proconfig::text || ' ' || has_function_privilege('public', p.oid, 'EXECUTE') "
+                        + "from pg_proc p join pg_namespace n on n.oid = p.pronamespace "
+                        + "where n.nspname = ? and p.proname like 'outbox%'")) {
+                    ps.setString(1, s);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            out.add(rs.getString(1));
+                        }
+                    }
+                }
+                return out;
+            });
+            String pinned = " true {\"search_path=pg_catalog, extensions\"} false";
+            assertThat(functions).as(s).containsExactlyInAnyOrder("outbox_claim" + pinned, "outbox_complete" + pinned,
+                    "outbox_reschedule_many" + pinned, "outbox_dead" + pinned, "outbox_requeue" + pinned);
         }
     }
 

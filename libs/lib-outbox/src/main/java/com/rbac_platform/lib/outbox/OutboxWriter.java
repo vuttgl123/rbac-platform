@@ -20,7 +20,6 @@ import tools.jackson.databind.json.JsonMapper;
  */
 public class OutboxWriter {
 
-    private static final String NOT_NULL_VIOLATION = "23502";
     private static final String INSUFFICIENT_PRIVILEGE = "42501";
 
     private final JdbcClient jdbc;
@@ -34,8 +33,8 @@ public class OutboxWriter {
         this.json = Objects.requireNonNull(json, "json");
         this.wakeup = Objects.requireNonNull(wakeup, "wakeup");
         OutboxProperties.requireSchema(schema);
-        // The tenant is read once per statement from the transaction setting; a missing tenant is a NOT NULL
-        // (or row-level security) violation, translated below. No RETURNING or ON CONFLICT: the service role is INSERT-only.
+        // The tenant is read once per statement from the transaction setting; a missing tenant fails the row-level
+        // security check, translated below. No RETURNING or ON CONFLICT: the service role is INSERT-only.
         this.insertOne = "insert into " + schema + ".outbox (tenant_id, aggregate_type, aggregate_id, event_type, payload, headers) "
                 + "values ((select util.current_tenant_id()), ?, ?, ?, ?::jsonb, ?::jsonb)";
         // One statement, one round trip, however many messages: the columns arrive as parallel arrays.
@@ -106,23 +105,24 @@ public class OutboxWriter {
         try {
             insert.run();
         } catch (DataAccessException e) {
-            if (missingTenant(e)) {
-                throw new IllegalStateException(
-                        "OutboxWriter found no tenant on the transaction; call it from within TenantScope.call", e);
+            if (insufficientPrivilege(e)) {
+                throw new IllegalStateException("OutboxWriter found no tenant on the transaction; call it from within "
+                        + "TenantScope.call (or the database role lacks INSERT on the outbox)", e);
             }
             throw e;
         }
     }
 
-    /** NOT NULL on tenant_id, or the row-level-security check that a null tenant fails first. */
-    private static boolean missingTenant(Throwable e) {
+    /**
+     * A 42501 on this insert. The policy only checks that tenant_id is the transaction's tenant, which the insert
+     * itself reads, so with the INSERT grant V12 gives the role it fails only when no tenant is bound. Told apart by
+     * SQLState alone: the message text is in the server's language (lc_messages). A NULL tenant never reaches the
+     * NOT NULL check, because the row-level security check runs first.
+     */
+    private static boolean insufficientPrivilege(Throwable e) {
         for (Throwable t = e; t != null; t = t.getCause()) {
             if (t instanceof SQLException sql) {
-                String state = sql.getSQLState();
-                if (NOT_NULL_VIOLATION.equals(state)) {
-                    return true;
-                }
-                return INSUFFICIENT_PRIVILEGE.equals(state) && String.valueOf(sql.getMessage()).contains("row-level security");
+                return INSUFFICIENT_PRIVILEGE.equals(sql.getSQLState());
             }
         }
         return false;

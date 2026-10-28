@@ -3,6 +3,7 @@ package com.rbac_platform.lib.outbox;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.rbac_platform.lib.db.TenantScope;
+import com.rbac_platform.lib.outbox.OutboxStore.Reschedule;
 import com.rbac_platform.testsupport.AppDatabase;
 import com.rbac_platform.testsupport.MigratedDatabase;
 import com.rbac_platform.testsupport.Sql;
@@ -99,10 +100,17 @@ class OutboxStoreTest {
         assertThat(rows()).isEqualTo(2);
         assertThat(store.complete(UUID.randomUUID(), List.of(second))).as("stale token").isZero();
 
-        assertThat(store.reschedule(token, second, "failed", Instant.now().plusSeconds(30), true)).isTrue();
-        assertThat(statusOf(second)).isEqualTo("dead");
-        assertThat(store.reschedule(UUID.randomUUID(), third, "stale", Instant.now(), false)).as("stale token").isFalse();
+        assertThat(store.reschedule(UUID.randomUUID(), List.of(new Reschedule(third, "stale", Instant.now(), true))))
+                .as("stale token").isZero();
         assertThat(statusOf(third)).isEqualTo("pending");
+        Instant later = Instant.parse("2030-01-01T00:00:00.123456Z");
+        assertThat(store.reschedule(token, List.of(new Reschedule(second, "failed", null, true),
+                new Reschedule(third, "retry", later, false)))).isEqualTo(2);
+        assertThat(statusOf(second)).isEqualTo("dead");
+        assertThat(statusOf(third)).isEqualTo("pending");
+        assertThat(db.inTx(null, null, c -> Sql.one(c, java.time.OffsetDateTime.class,
+                "select next_attempt_at from identity.outbox where id = ?", third)).toInstant()).isEqualTo(later);
+        assertThat(store.reschedule(token, List.of())).as("nothing to do").isZero();
     }
 
     @Test
@@ -115,7 +123,8 @@ class OutboxStoreTest {
         UUID token = UUID.randomUUID();
         OutboxRecord record = store.claim(10, Duration.ofSeconds(60), token).get(0);
 
-        assertThat(store.reschedule(token, record.id(), "transient", Instant.now().minusSeconds(1), false)).isTrue();
+        assertThat(store.reschedule(token, List.of(new Reschedule(record.id(), "transient", Instant.now().minusSeconds(1),
+                false)))).isEqualTo(1);
 
         List<OutboxRecord> again = store.claim(10, Duration.ofSeconds(60), UUID.randomUUID());
         assertThat(again).hasSize(1);
@@ -123,10 +132,11 @@ class OutboxStoreTest {
     }
 
     @Test
-    void completeWithNoIdsDoesNotCallTheDatabase() {
+    void completeOrRescheduleWithNoRowsDoesNotCallTheDatabase() {
         JdbcClient jdbc = org.mockito.Mockito.mock(JdbcClient.class);
         OutboxStore offline = new OutboxStore(jdbc, json, "identity");
         assertThat(offline.complete(UUID.randomUUID(), List.of())).isZero();
+        assertThat(offline.reschedule(UUID.randomUUID(), List.of())).isZero();
         org.mockito.Mockito.verifyNoInteractions(jdbc);
     }
 
@@ -149,7 +159,7 @@ class OutboxStoreTest {
     @Test
     void invalidTuningPropertiesFailStartup() {
         List<String> bad = new ArrayList<>(List.of("rbac.outbox.batch-size=0", "rbac.outbox.batch-size=1001",
-                "rbac.outbox.poll-interval=0s", "rbac.outbox.lease=-1s", "rbac.outbox.max-attempts=0",
+                "rbac.outbox.poll-interval=0s", "rbac.outbox.lease=-1s", "rbac.outbox.lease=61m", "rbac.outbox.max-attempts=0",
                 "rbac.outbox.backoff.initial=0s", "rbac.outbox.backoff.max=0s"));
         for (String property : bad) {
             new ApplicationContextRunner()

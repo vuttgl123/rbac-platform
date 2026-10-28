@@ -15,7 +15,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param publisher    name of the publisher strategy the relay uses
  * @param batchSize    rows claimed per relay pass
  * @param pollInterval longest wait between relay passes when no writer wakes the relay
- * @param lease        how long a claimed row is held before another relay may claim it again
+ * @param lease        how long a claimed row is held before another relay may claim it again; at most an hour
  * @param maxAttempts  deliveries tried before a row is buried
  * @param backoff      delay between a failed delivery and the next one
  */
@@ -30,6 +30,7 @@ public record OutboxProperties(String schema,
                                @DefaultValue Backoff backoff) {
 
     private static final Pattern SCHEMA = Pattern.compile("[a-z_][a-z0-9_]*");
+    private static final Duration MAX_LEASE = Duration.ofHours(1);
 
     /** @param initial delay after the first failure @param max ceiling of the delay as failures accumulate */
     public record Backoff(@DefaultValue("1s") Duration initial, @DefaultValue("5m") Duration max) {
@@ -49,6 +50,10 @@ public record OutboxProperties(String schema,
         }
         requirePositive(pollInterval, "rbac.outbox.poll-interval");
         requirePositive(lease, "rbac.outbox.lease");
+        // outbox_claim refuses longer leases: a relay holding rows that long has hung, not worked.
+        if (lease.compareTo(MAX_LEASE) > 0) {
+            throw new IllegalArgumentException("rbac.outbox.lease must be at most " + MAX_LEASE + " but was " + lease);
+        }
         if (maxAttempts < 1) {
             throw new IllegalArgumentException("rbac.outbox.max-attempts must be at least 1 but was " + maxAttempts);
         }

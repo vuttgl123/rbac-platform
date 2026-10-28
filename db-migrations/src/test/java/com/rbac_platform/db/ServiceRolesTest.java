@@ -114,7 +114,8 @@ class ServiceRolesTest {
                 "table " + schema + ".outbox INSERT",
                 "function " + schema + ".outbox_claim(integer,interval,uuid) EXECUTE",
                 "function " + schema + ".outbox_complete(uuid,uuid[]) EXECUTE",
-                "function " + schema + ".outbox_reschedule(uuid,uuid,text,timestamp with time zone,boolean) EXECUTE");
+                "function " + schema + ".outbox_reschedule_many(uuid,uuid[],text[],timestamp with time zone[],boolean[]) "
+                        + "EXECUTE");
     }
 
     private static List<String> batchEntries(String s) {

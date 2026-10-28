@@ -91,7 +91,8 @@ class SupabaseExposureTest {
                     + "where n.nspname in (" + SCHEMAS + ") and p.prosecdef");
             assertThat(definers).isNotEmpty().contains("tenancy.resolve_domain(text)",
                     "apps.resolve_api_key(text)", "tenancy.create_tenant(text,text,text,text,timestamp with time zone,uuid)",
-                    "authz.seed_builtin_model(uuid)", "util.create_monthly_partition(regclass,date)");
+                    "authz.seed_builtin_model(uuid)", "util.create_monthly_partition(regclass,date)",
+                    "identity.outbox_reschedule_many(uuid,uuid[],text[],timestamp with time zone[],boolean[])");
 
             List<String> all = strings(c, "select p.oid::regprocedure::text from pg_proc p "
                     + "join pg_namespace n on n.oid = p.pronamespace where n.nspname in (" + SCHEMAS + ")");

@@ -34,7 +34,9 @@ import org.springframework.transaction.support.TransactionTemplate;
  *
  * <p>When started, it runs on one daemon thread, {@code outbox-relay-<schema>}: a full batch is followed at once by
  * the next one; otherwise it waits for a writer's commit or {@code poll-interval}, whichever comes first. On stop it
- * claims nothing more, finishes the batch in flight (waiting at most {@code lease}) and then reports stopped.
+ * claims nothing more, finishes the batch in flight and then reports stopped. It waits for that batch at most the
+ * lease or the shutdown phase's timeout ({@code spring.lifecycle.timeout-per-shutdown-phase}), whichever is shorter:
+ * past the phase timeout the context closes without it anyway, and past the lease the events are claimable again.
  */
 public class OutboxRelay implements SmartLifecycle {
 
@@ -50,16 +52,22 @@ public class OutboxRelay implements SmartLifecycle {
     private final List<OutboxInterceptor> unwinding;
     private final TransactionTemplate transactions;
     private final OutboxProperties properties;
+    private final Duration stopWait;
     private final String threadName;
 
     private final Object lifecycle = new Object();
     /** The current run of the loop; null before the first start. Guarded by {@link #lifecycle}. */
     private Worker worker;
 
-    /** @param interceptors in the order their {@code before} runs; {@code after} and {@code onError} run in reverse */
+    /**
+     * @param interceptors          in the order their {@code before} runs; {@code after} and {@code onError} run in
+     *                              reverse
+     * @param shutdownPhaseTimeout  how long the context waits for a lifecycle phase to stop before it goes on without
+     *                              it; {@link #stop(Runnable)} never waits longer
+     */
     public OutboxRelay(OutboxStore store, OutboxWakeup wakeup, OutboxPublisher publisher, RetryPolicy retryPolicy,
                        List<OutboxInterceptor> interceptors, TransactionTemplate transactions,
-                       OutboxProperties properties) {
+                       OutboxProperties properties, Duration shutdownPhaseTimeout) {
         this.store = Objects.requireNonNull(store, "store");
         this.wakeup = Objects.requireNonNull(wakeup, "wakeup");
         this.publisher = Objects.requireNonNull(publisher, "publisher");
@@ -68,6 +76,8 @@ public class OutboxRelay implements SmartLifecycle {
         this.unwinding = this.interceptors.reversed();
         this.transactions = Objects.requireNonNull(transactions, "transactions");
         this.properties = Objects.requireNonNull(properties, "properties");
+        Objects.requireNonNull(shutdownPhaseTimeout, "shutdownPhaseTimeout");
+        this.stopWait = shutdownPhaseTimeout.compareTo(properties.lease()) < 0 ? shutdownPhaseTimeout : properties.lease();
         this.threadName = "outbox-relay-" + properties.schema();
     }
 
@@ -97,6 +107,11 @@ public class OutboxRelay implements SmartLifecycle {
                 continue;
             }
             Failure failure = deliver(record);
+            // A handler that was interrupted (or restored the flag before throwing) has failed as its own event. Left
+            // set, the flag would fail every later blocking call on this thread: the rest of the batch's handlers and
+            // the acknowledgement's connection checkout. Nothing else interrupts the relay's thread (stop uses a flag
+            // and a wakeup), so clearing it loses no request to stop.
+            Thread.interrupted();
             if (failure == null) {
                 delivered.add(record.id());
             } else {
@@ -135,9 +150,7 @@ public class OutboxRelay implements SmartLifecycle {
             return null;
         } catch (Throwable e) {
             rethrowIfFatal(e);
-            if (e instanceof InterruptedException) {
-                Thread.currentThread().interrupt();
-            }
+            // An InterruptedException is not re-asserted on the thread: runOnce clears the flag after every event.
             for (OutboxInterceptor interceptor : unwinding) {
                 try {
                     interceptor.onError(event, e);
@@ -182,26 +195,35 @@ public class OutboxRelay implements SmartLifecycle {
         }
     }
 
-    /** One short transaction: delete what was delivered, release or bury what failed. */
+    /**
+     * One short transaction of at most two statements, whatever the batch size: delete what was delivered, then
+     * release or bury every failure at once.
+     */
     private void acknowledge(UUID token, List<UUID> delivered, List<Failure> failures) {
-        int[] completed = new int[1];
+        List<OutboxStore.Reschedule> reschedules = new ArrayList<>(failures.size());
+        for (Failure failure : failures) {
+            boolean dead = failure.decision() instanceof RetryDecision.Bury;
+            Instant at = failure.decision() instanceof RetryDecision.RetryAt(Instant retryAt) ? retryAt : null;
+            reschedules.add(new OutboxStore.Reschedule(failure.record().id(), failure.message(), at, dead));
+        }
+        int[] counts = new int[2];
         transactions.executeWithoutResult(status -> {
-            completed[0] = store.complete(token, delivered);
-            for (Failure failure : failures) {
-                boolean dead = failure.decision() instanceof RetryDecision.Bury;
-                Instant at = failure.decision() instanceof RetryDecision.RetryAt(Instant retryAt) ? retryAt : null;
-                if (!store.reschedule(token, failure.record().id(), failure.message(), at, dead)) {
-                    log.warn("Outbox event {} was no longer leased to this relay; its failure was not recorded",
-                            failure.record().id());
-                } else if (failure.decision() instanceof RetryDecision.Bury(String reason)) {
-                    log.warn("Outbox event {} ({}) buried after {} attempts: {}", failure.record().id(),
-                            failure.record().eventType(), failure.record().attempts(), reason);
-                }
-            }
+            counts[0] = store.complete(token, delivered);
+            counts[1] = store.reschedule(token, reschedules);
         });
-        if (completed[0] < delivered.size()) {
+        if (counts[0] < delivered.size()) {
             log.warn("{} of {} delivered outbox events were no longer leased to this relay and may be delivered again",
-                    delivered.size() - completed[0], delivered.size());
+                    delivered.size() - counts[0], delivered.size());
+        }
+        if (counts[1] < failures.size()) {
+            log.warn("{} of {} failed outbox events were no longer leased to this relay; their failures were not recorded",
+                    failures.size() - counts[1], failures.size());
+        }
+        for (Failure failure : failures) {
+            if (failure.decision() instanceof RetryDecision.Bury(String reason)) {
+                log.warn("Outbox event {} ({}) buried after {} attempts: {}", failure.record().id(),
+                        failure.record().eventType(), failure.record().attempts(), reason);
+            }
         }
     }
 
@@ -243,7 +265,7 @@ public class OutboxRelay implements SmartLifecycle {
 
     /**
      * Claims nothing more and returns at once; {@code callback} runs once the batch in flight is acknowledged, or
-     * after {@code lease} if it is not by then.
+     * after the lease or the shutdown phase timeout, whichever is shorter, if it is not by then.
      */
     @Override
     public void stop(Runnable callback) {
@@ -257,12 +279,12 @@ public class OutboxRelay implements SmartLifecycle {
             current.stopRequested = true;
         }
         wakeup.signal();
-        long leaseMillis = properties.lease().toMillis();
+        long waitMillis = stopWait.toMillis();
         // A copy, so the timeout never marks the worker itself finished while its thread still runs.
-        current.finished.copy().orTimeout(leaseMillis, TimeUnit.MILLISECONDS).whenComplete((done, failure) -> {
+        current.finished.copy().orTimeout(waitMillis, TimeUnit.MILLISECONDS).whenComplete((done, failure) -> {
             if (failure instanceof TimeoutException) {
-                log.warn("Outbox relay for schema {} did not finish its batch within the {} ms lease; stopping without "
-                        + "it, its events will be claimed again", properties.schema(), leaseMillis);
+                log.warn("Outbox relay for schema {} did not finish its batch within {} ms; stopping without it, its "
+                        + "events will be claimed again once their lease expires", properties.schema(), waitMillis);
             }
             callback.run();
         });

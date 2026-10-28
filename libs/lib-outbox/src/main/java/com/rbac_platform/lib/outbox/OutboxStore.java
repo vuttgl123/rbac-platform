@@ -5,7 +5,6 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -18,7 +17,8 @@ import tools.jackson.databind.json.JsonMapper;
 /**
  * The relay's view of the outbox: each method is one call to a V12 function on the caller's connection, so it
  * joins the caller's transaction when there is one and autocommits otherwise. The functions run as the table owner
- * and see every tenant; the claim token ties complete and reschedule to the claim that leased the rows.
+ * and see every tenant; the claim token ties complete and reschedule to the claim that leased the rows. Complete and
+ * reschedule take a whole batch in one statement, so acknowledging a pass costs the same however many events failed.
  */
 public class OutboxStore {
 
@@ -31,6 +31,14 @@ public class OutboxStore {
     private final String completeSql;
     private final String rescheduleSql;
 
+    /** One failed event: released for a retry at {@code nextAttemptAt} (null: at once), or buried when {@code dead}. */
+    public record Reschedule(UUID id, String error, Instant nextAttemptAt, boolean dead) {
+
+        public Reschedule {
+            Objects.requireNonNull(id, "id");
+        }
+    }
+
     public OutboxStore(JdbcClient jdbc, JsonMapper json, String schema) {
         this.jdbc = jdbc;
         this.json = json;
@@ -38,7 +46,9 @@ public class OutboxStore {
         // The function returns rows in no particular order; id is time-ordered, so sorting by it keeps write order.
         this.claimSql = "select * from " + schema + ".outbox_claim(?, make_interval(secs => ?), ?) order by id";
         this.completeSql = "select " + schema + ".outbox_complete(?, ?::uuid[])";
-        this.rescheduleSql = "select " + schema + ".outbox_reschedule(?, ?, ?::text, ?::timestamptz, ?)";
+        // Parallel arrays, sent as text and cast, as the writer does: one statement however many rows.
+        this.rescheduleSql = "select " + schema
+                + ".outbox_reschedule_many(?, ?::uuid[], ?::text[], ?::timestamptz[], ?::boolean[])";
     }
 
     /** Leases up to {@code limit} due rows for {@code lease}, counting an attempt on each, and returns them sorted by id. */
@@ -63,13 +73,28 @@ public class OutboxStore {
         return jdbc.sql(completeSql).param(token).param(array).query(Integer.class).single();
     }
 
-    /** Releases a leased row for a retry at {@code nextAttemptAt}, or buries it; false when the token no longer holds the lease. */
-    public boolean reschedule(UUID token, UUID id, String error, Instant nextAttemptAt, boolean dead) {
+    /** Releases or buries every row in {@code rows} still leased under {@code token}; returns how many it updated. */
+    public int reschedule(UUID token, Collection<Reschedule> rows) {
         Objects.requireNonNull(token, "token");
-        Objects.requireNonNull(id, "id");
-        OffsetDateTime next = nextAttemptAt == null ? null : nextAttemptAt.atOffset(ZoneOffset.UTC);
-        return jdbc.sql(rescheduleSql).param(token).param(id).param(error).param(next).param(dead)
-                .query(Boolean.class).single();
+        if (rows.isEmpty()) {
+            return 0;
+        }
+        int n = rows.size();
+        String[] ids = new String[n];
+        String[] errors = new String[n];
+        String[] next = new String[n];
+        String[] dead = new String[n];
+        int i = 0;
+        for (Reschedule row : rows) {
+            ids[i] = row.id().toString();
+            errors[i] = row.error();
+            // Instant.toString is ISO-8601 in UTC, which timestamptz reads exactly (to the microsecond).
+            next[i] = row.nextAttemptAt() == null ? null : row.nextAttemptAt().toString();
+            dead[i] = Boolean.toString(row.dead());
+            i++;
+        }
+        return jdbc.sql(rescheduleSql).param(token).param(ids).param(errors).param(next).param(dead)
+                .query(Integer.class).single();
     }
 
     private OutboxRecord map(ResultSet rs, int row) throws SQLException {

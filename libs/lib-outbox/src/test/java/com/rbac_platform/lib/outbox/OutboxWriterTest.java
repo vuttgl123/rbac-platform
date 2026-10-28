@@ -2,12 +2,17 @@ package com.rbac_platform.lib.outbox;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.rbac_platform.lib.core.logging.RequestLoggingFilter;
 import com.rbac_platform.lib.db.TenantScope;
 import com.rbac_platform.testsupport.AppDatabase;
 import com.rbac_platform.testsupport.MigratedDatabase;
 import com.rbac_platform.testsupport.Sql;
+import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -20,6 +25,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.jdbc.UncategorizedSQLException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -219,6 +225,44 @@ class OutboxWriterTest {
             writer.appendAll(List.of(OutboxMessage.of("user", "u-1", "user.created", payload("{}"))));
             return null;
         })).isInstanceOf(IllegalStateException.class).hasMessageContaining("TenantScope.call");
+    }
+
+    /** A writer whose every statement fails with {@code failure}, as the driver reports it. */
+    private OutboxWriter failingWriter(SQLException failure) {
+        JdbcClient failing = mock(JdbcClient.class);
+        JdbcClient.StatementSpec spec = mock(JdbcClient.StatementSpec.class);
+        when(failing.sql(anyString())).thenReturn(spec);
+        when(spec.param(any())).thenReturn(spec);
+        when(spec.update()).thenThrow(new UncategorizedSQLException("outbox insert", "insert ...", failure));
+        return new OutboxWriter(failing, json, wakeup, "identity");
+    }
+
+    @Test
+    void aMissingTenantIsRecognisedWhateverLanguageTheServerSpeaks() {
+        // lc_messages is the server's setting: the same row-level-security violation, worded by a French server.
+        SQLException french = new SQLException(
+                "la nouvelle ligne viole la politique de sécurité au niveau ligne pour la table « outbox »", "42501");
+        OutboxWriter writer = failingWriter(french);
+
+        assertThatThrownBy(() -> transactions.execute(status -> {
+            writer.append(OutboxMessage.of("user", "u-1", "user.created", payload("{}")));
+            return null;
+        })).isInstanceOf(IllegalStateException.class).hasMessageContaining("TenantScope.call").hasRootCause(french);
+        assertThatThrownBy(() -> transactions.execute(status -> {
+            writer.appendAll(List.of(OutboxMessage.of("user", "u-1", "user.created", payload("{}"))));
+            return null;
+        })).isInstanceOf(IllegalStateException.class).hasMessageContaining("TenantScope.call").hasRootCause(french);
+    }
+
+    @Test
+    void otherDatabaseFailuresAreNotReportedAsAMissingTenant() {
+        SQLException tooLong = new SQLException("value too long for type character varying(10)", "22001");
+        OutboxWriter writer = failingWriter(tooLong);
+
+        assertThatThrownBy(() -> transactions.execute(status -> {
+            writer.append(OutboxMessage.of("user", "u-1", "user.created", payload("{}")));
+            return null;
+        })).isInstanceOf(UncategorizedSQLException.class).hasRootCause(tooLong);
     }
 
     @Test

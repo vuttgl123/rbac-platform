@@ -2,7 +2,7 @@ SET LOCAL ROLE rbac_owner;
 
 -- V12: per-service transactional outbox. Each service that publishes events owns an <schema>.outbox table in its
 -- own schema (identity, authz), written in the same transaction as the change it describes and drained by a
--- relay (claim, publish, complete or reschedule). util.create_outbox builds the table, its policies and its
+-- relay (claim, publish, complete or reschedule_many). util.create_outbox builds the table, its policies and its
 -- functions once per service, so both copies are identical by construction.
 --
 -- Writer side: the service role is INSERT-only. It cannot SELECT, UPDATE or DELETE, so it cannot use
@@ -13,8 +13,9 @@ SET LOCAL ROLE rbac_owner;
 -- every relay operation is a SECURITY DEFINER function owned by rbac_owner (the owner_all policy lets it
 -- through). outbox_claim is a lease: it bumps attempts and pushes next_attempt_at to now() + p_lease, stamping a
 -- claim_token. A relay that crashes simply lets the lease expire and the row is claimed again; a slow relay that
--- comes back after its lease expired holds a stale token, so outbox_complete and outbox_reschedule (which match
--- on the token) do nothing for it. Concurrent relays are kept apart by FOR UPDATE SKIP LOCKED.
+-- comes back after its lease expired holds a stale token, so outbox_complete and outbox_reschedule_many (which
+-- match on the token) do nothing for it. Concurrent relays are kept apart by FOR UPDATE SKIP LOCKED. Complete and
+-- reschedule_many take a whole batch per call, so acknowledging a pass costs two round trips however many failed.
 --
 -- Operator side: rows the relay gave up on are 'dead'. rbac_admin lists them (outbox_dead) and puts them back
 -- (outbox_requeue); the service role cannot.
@@ -51,7 +52,8 @@ BEGIN
             next_attempt_at timestamptz NOT NULL DEFAULT now(),
             claim_token     uuid,
             last_error      text
-        ) WITH (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_threshold = 50)$t$, p_schema);
+        ) WITH (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_threshold = 50,
+                autovacuum_analyze_scale_factor = 0.01, autovacuum_analyze_threshold = 50)$t$, p_schema);
 
     EXECUTE format('CREATE INDEX outbox_pending_idx ON %I.outbox (next_attempt_at, id) WHERE status = ''pending''',
                    p_schema);
@@ -65,27 +67,36 @@ BEGIN
         'CREATE POLICY owner_all ON %I.outbox FOR ALL TO rbac_owner USING (true) WITH CHECK (true)', p_schema);
     EXECUTE format('GRANT INSERT ON %I.outbox TO %s', p_schema, p_role::text);
 
-    -- outbox_claim: lease up to p_limit due rows.
+    -- outbox_claim: lease up to p_limit due rows, for at most an hour (a relay holding rows longer has hung).
+    -- The due rows are picked in a MATERIALIZED CTE, evaluated exactly once. Written as
+    -- "UPDATE ... WHERE id IN (SELECT ... LIMIT p_limit FOR UPDATE SKIP LOCKED)", the planner may run the subquery
+    -- as the inner side of a nested-loop semi join and rescan it per row; each rescan skips the rows the statement
+    -- already updated and so pulls in further ones, leasing far more than p_limit. Statistics taken while the queue
+    -- was near empty (its usual state) are enough to get that plan.
     EXECUTE format($t$
         CREATE FUNCTION %1$I.outbox_claim(p_limit int, p_lease interval, p_token uuid) RETURNS SETOF %1$I.outbox
             LANGUAGE plpgsql SECURITY DEFINER
             SET search_path = pg_catalog, extensions
         AS $fn$
         BEGIN
-            IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 1000 OR p_lease IS NULL OR p_lease <= interval '0'
+            IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 1000
+               OR p_lease IS NULL OR p_lease <= interval '0' OR p_lease > interval '1 hour'
                OR p_token IS NULL THEN
-                RAISE EXCEPTION 'invalid_argument: p_limit must be 1..1000, p_lease positive and p_token set'
+                RAISE EXCEPTION 'invalid_argument: p_limit must be 1..1000, p_lease in (0, 1 hour] and p_token set'
                     USING ERRCODE = 'invalid_parameter_value';
             END IF;
             RETURN QUERY
-            WITH claimed AS (
+            WITH due AS MATERIALIZED (
+                SELECT q.id FROM %1$I.outbox q
+                WHERE q.status = 'pending' AND q.next_attempt_at <= now()
+                ORDER BY q.next_attempt_at, q.id
+                LIMIT p_limit
+                FOR UPDATE SKIP LOCKED
+            ), claimed AS (
                 UPDATE %1$I.outbox o
                 SET attempts = o.attempts + 1, next_attempt_at = now() + p_lease, claim_token = p_token
-                WHERE o.id IN (SELECT q.id FROM %1$I.outbox q
-                               WHERE q.status = 'pending' AND q.next_attempt_at <= now()
-                               ORDER BY q.next_attempt_at, q.id
-                               LIMIT p_limit
-                               FOR UPDATE SKIP LOCKED)
+                FROM due
+                WHERE o.id = due.id
                 RETURNING o.*
             )
             SELECT * FROM claimed;
@@ -108,24 +119,33 @@ BEGIN
         END
         $fn$ $t$, p_schema);
 
-    -- outbox_reschedule: release a claimed row for a later retry, or bury it.
+    -- outbox_reschedule_many: release claimed rows for a later retry, or bury them, in one statement. Element i of
+    -- each array describes the same row; a NULL next attempt means now. Rows the token no longer holds are skipped;
+    -- the result is how many rows were updated.
     EXECUTE format($t$
-        CREATE FUNCTION %1$I.outbox_reschedule(p_token uuid, p_id uuid, p_error text, p_next_attempt_at timestamptz,
-                                               p_dead boolean) RETURNS boolean
+        CREATE FUNCTION %1$I.outbox_reschedule_many(p_token uuid, p_ids uuid[], p_errors text[], p_next timestamptz[],
+                                                    p_dead boolean[]) RETURNS int
             LANGUAGE plpgsql SECURITY DEFINER
             SET search_path = pg_catalog, extensions
         AS $fn$
         DECLARE
             v_count int;
         BEGIN
+            IF p_ids IS NULL OR cardinality(p_errors) IS DISTINCT FROM cardinality(p_ids)
+               OR cardinality(p_next) IS DISTINCT FROM cardinality(p_ids)
+               OR cardinality(p_dead) IS DISTINCT FROM cardinality(p_ids) THEN
+                RAISE EXCEPTION 'invalid_argument: p_ids, p_errors, p_next and p_dead must be arrays of one length'
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
             UPDATE %1$I.outbox o
-            SET status = CASE WHEN p_dead THEN 'dead' ELSE 'pending' END,
-                next_attempt_at = coalesce(p_next_attempt_at, now()),
-                last_error = left(p_error, 2000),
+            SET status = CASE WHEN coalesce(r.dead, false) THEN 'dead' ELSE 'pending' END,
+                next_attempt_at = coalesce(r.next_attempt_at, now()),
+                last_error = left(r.error, 2000),
                 claim_token = NULL
-            WHERE o.id = p_id AND o.claim_token = p_token AND o.status = 'pending';
+            FROM unnest(p_ids, p_errors, p_next, p_dead) AS r(id, error, next_attempt_at, dead)
+            WHERE o.id = r.id AND o.claim_token = p_token AND o.status = 'pending';
             GET DIAGNOSTICS v_count = ROW_COUNT;
-            RETURN v_count > 0;
+            RETURN v_count;
         END
         $fn$ $t$, p_schema);
 
@@ -164,11 +184,12 @@ BEGIN
 
     EXECUTE format('REVOKE EXECUTE ON FUNCTION %1$I.outbox_claim(int, interval, uuid), '
                    '%1$I.outbox_complete(uuid, uuid[]), '
-                   '%1$I.outbox_reschedule(uuid, uuid, text, timestamptz, boolean), '
+                   '%1$I.outbox_reschedule_many(uuid, uuid[], text[], timestamptz[], boolean[]), '
                    '%1$I.outbox_dead(int), %1$I.outbox_requeue(uuid[]) FROM PUBLIC', p_schema);
     EXECUTE format('GRANT EXECUTE ON FUNCTION %1$I.outbox_claim(int, interval, uuid), '
                    '%1$I.outbox_complete(uuid, uuid[]), '
-                   '%1$I.outbox_reschedule(uuid, uuid, text, timestamptz, boolean) TO %2$s', p_schema, p_role::text);
+                   '%1$I.outbox_reschedule_many(uuid, uuid[], text[], timestamptz[], boolean[]) TO %2$s',
+                   p_schema, p_role::text);
     EXECUTE format('GRANT EXECUTE ON FUNCTION %1$I.outbox_dead(int), %1$I.outbox_requeue(uuid[]) TO rbac_admin',
                    p_schema);
 END

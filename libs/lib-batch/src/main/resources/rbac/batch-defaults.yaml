@@ -7,6 +7,10 @@ spring:
       table-prefix: ${rbac.batch.schema}.batch_
       # The repository tables come from the migrations; no service creates them.
       initialize-schema: never
+      # Batch defaults to SERIALIZABLE here, where concurrent launches (two jobs on one cron, an on-demand launch
+      # during a fire) can fail each other with 40001 and lose a scheduled run. Duplicates are already kept out by
+      # batch_schedule_slot's primary key and by JOB_INST_UN.
+      isolation-level-for-create: read_committed
     job:
       # Jobs run when they are scheduled (rbac.batch.jobs) or launched, never at startup.
       enabled: false

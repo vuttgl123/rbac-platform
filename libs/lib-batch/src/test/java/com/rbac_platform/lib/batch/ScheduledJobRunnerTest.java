@@ -2,6 +2,9 @@ package com.rbac_platform.lib.batch;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -17,9 +20,15 @@ import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.batch.core.job.Job;
+import org.springframework.batch.core.job.JobExecution;
 import org.springframework.batch.core.job.builder.JobBuilder;
 import org.springframework.batch.core.launch.JobOperator;
 import org.springframework.batch.core.repository.JobRepository;
@@ -225,7 +234,8 @@ class ScheduledJobRunnerTest {
                 .withBean(JobOperator.class, () -> mock(JobOperator.class))
                 .withBean(JobRepository.class, () -> mock(JobRepository.class))
                 .withBean("noop", Job.class, () -> noop)
-                .withPropertyValues("rbac.batch.schema=identity");
+                .withPropertyValues("rbac.batch.schema=identity", "spring.batch.job.enabled=false",
+                        "spring.batch.jdbc.table-prefix=identity.batch_");
 
         runner.withPropertyValues("rbac.batch.jobs.noop.cron=0 0 * * * *")
                 .run(context -> assertThat(context).hasNotFailed());
@@ -240,5 +250,49 @@ class ScheduledJobRunnerTest {
                         .hasMessageContaining(misconfiguration[1]);
             });
         }
+    }
+
+    @Test
+    void shutdownLetsARunningJobFinishAndDropsLaterFires() throws Exception {
+        CountDownLatch started = new CountDownLatch(1);
+        AtomicInteger launches = new AtomicInteger();
+        AtomicBoolean interrupted = new AtomicBoolean();
+        AtomicBoolean finished = new AtomicBoolean();
+        JobLaunchService launcher = mock(JobLaunchService.class);
+        when(launcher.jobNames()).thenReturn(Set.of("slow"));
+        when(launcher.launch(eq("slow"), anyMap())).thenAnswer(invocation -> {
+            launches.incrementAndGet();
+            started.countDown();
+            try {
+                Thread.sleep(1000);
+                finished.set(true);
+            } catch (InterruptedException e) {
+                interrupted.set(true);
+            }
+            return mock(JobExecution.class);
+        });
+        ScheduleSlots slots = mock(ScheduleSlots.class);
+        when(slots.claim(any(), any(), any())).thenReturn(true);
+
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(BatchAutoConfiguration.class))
+                .withBean(JdbcClient.class, () -> mock(JdbcClient.class))
+                .withBean(JobOperator.class, () -> mock(JobOperator.class))
+                .withBean(JobRepository.class, () -> mock(JobRepository.class))
+                .withBean(JobLaunchService.class, () -> launcher)
+                .withBean(ScheduleSlots.class, () -> slots)
+                .withPropertyValues("rbac.batch.schema=identity", "spring.batch.job.enabled=false",
+                        "spring.batch.jdbc.table-prefix=identity.batch_", "rbac.batch.jobs.slow.cron=* * * * * *")
+                .run(context -> {
+                    assertThat(started.await(3, TimeUnit.SECONDS)).isTrue();
+                    long closing = System.nanoTime();
+                    context.close();
+                    assertThat(Duration.ofNanos(System.nanoTime() - closing)).isLessThan(Duration.ofSeconds(5));
+                });
+
+        // The fire that was running finished undisturbed; the one the cron would have scheduled next never ran.
+        assertThat(finished).isTrue();
+        assertThat(interrupted).isFalse();
+        assertThat(launches).hasValue(1);
     }
 }

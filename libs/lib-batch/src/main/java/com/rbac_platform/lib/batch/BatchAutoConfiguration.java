@@ -11,6 +11,7 @@ import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.core.env.Environment;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -26,6 +27,26 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 @ConditionalOnProperty("rbac.batch.schema")
 @EnableConfigurationProperties(BatchProperties.class)
 public class BatchAutoConfiguration {
+
+    static final String DEFAULTS = "classpath:rbac/batch-defaults.yaml";
+
+    /**
+     * Without the batch defaults, Boot would launch every job at startup on every instance (bypassing the schedule
+     * slots) and keep the job repository in the wrong tables, so a service that sets rbac.batch.schema must import
+     * them.
+     */
+    BatchAutoConfiguration(Environment environment, BatchProperties properties) {
+        Binder binder = Binder.get(environment);
+        boolean launchesAtStartup = binder.bind("spring.batch.job.enabled", Boolean.class).orElse(true);
+        String tablePrefix = binder.bind("spring.batch.jdbc.table-prefix", String.class).orElse(null);
+        String expectedPrefix = properties.schema() + ".batch_";
+        if (launchesAtStartup || !expectedPrefix.equals(tablePrefix)) {
+            throw new IllegalStateException("rbac.batch.schema is set but the batch defaults are missing "
+                    + "(spring.batch.job.enabled=" + launchesAtStartup + ", spring.batch.jdbc.table-prefix="
+                    + tablePrefix + "; expected false and " + expectedPrefix + "): import " + DEFAULTS
+                    + " with spring.config.import");
+        }
+    }
 
     @Bean
     @ConditionalOnMissingBean

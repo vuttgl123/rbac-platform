@@ -6,16 +6,24 @@ import static org.mockito.Mockito.mock;
 import com.rbac_platform.testsupport.AppDatabase;
 import com.rbac_platform.testsupport.MigratedDatabase;
 import com.rbac_platform.testsupport.Sql;
+import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
+import org.springframework.aop.Advisor;
+import org.springframework.aop.framework.Advised;
 import org.springframework.batch.core.BatchStatus;
 import org.springframework.batch.core.job.Job;
 import org.springframework.batch.core.job.JobExecution;
+import org.springframework.batch.core.job.JobInstance;
 import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.job.parameters.JobParameters;
 import org.springframework.batch.core.launch.JobOperator;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.builder.StepBuilder;
+import org.springframework.batch.infrastructure.item.ExecutionContext;
 import org.springframework.batch.infrastructure.repeat.RepeatStatus;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -28,6 +36,8 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.interceptor.TransactionInterceptor;
 
 @SpringBootTest(classes = BatchTestApplication.class)
 @Import(BatchRepositoryLocationTest.NoopJobConfig.class)
@@ -54,6 +64,9 @@ class BatchRepositoryLocationTest {
 
     @Autowired
     JobLaunchService launcher;
+
+    @Autowired
+    JobRepository repository;
 
     @Test
     void jobMetadataIsWrittenIntoTheServiceSchema() {
@@ -83,5 +96,52 @@ class BatchRepositoryLocationTest {
                     assertThat(context).hasFailed();
                     assertThat(context).getFailure().hasStackTraceContaining("rbac.batch.schema must match");
                 });
+    }
+
+    @Test
+    void jobRepositoryCreatesAtReadCommitted() throws Exception {
+        // Batch 6 creates instances and executions at SERIALIZABLE, where two concurrent launches can fail each other
+        // with 40001. The schedule slot and JOB_INST_UN already keep out duplicates, so read committed is enough.
+        TransactionInterceptor transactions = Arrays.stream(((Advised) repository).getAdvisors())
+                .map(Advisor::getAdvice)
+                .filter(TransactionInterceptor.class::isInstance)
+                .map(TransactionInterceptor.class::cast)
+                .findFirst().orElseThrow();
+        for (Method create : List.of(
+                JobRepository.class.getMethod("createJobInstance", String.class, JobParameters.class),
+                JobRepository.class.getMethod("createJobExecution", JobInstance.class, JobParameters.class,
+                        ExecutionContext.class))) {
+            assertThat(transactions.getTransactionAttributeSource().getTransactionAttribute(create, JobRepository.class))
+                    .as(create.getName())
+                    .extracting(TransactionDefinition::getIsolationLevel)
+                    .isEqualTo(TransactionDefinition.ISOLATION_READ_COMMITTED);
+        }
+    }
+
+    @Test
+    void startupFailsWithoutTheBatchDefaults() {
+        ApplicationContextRunner runner = new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(BatchAutoConfiguration.class))
+                .withBean(JdbcClient.class, () -> mock(JdbcClient.class))
+                .withBean(JobOperator.class, () -> mock(JobOperator.class))
+                .withBean(JobRepository.class, () -> mock(JobRepository.class))
+                .withPropertyValues("rbac.batch.schema=identity");
+
+        for (String[] properties : new String[][]{
+                {},
+                {"spring.batch.job.enabled=false"},
+                {"spring.batch.jdbc.table-prefix=identity.batch_"},
+                {"spring.batch.job.enabled=false", "spring.batch.jdbc.table-prefix=audit.batch_"}}) {
+            runner.withPropertyValues(properties).run(context -> {
+                assertThat(context).as(Arrays.toString(properties)).hasFailed();
+                assertThat(context.getStartupFailure()).as(Arrays.toString(properties))
+                        .rootCause()
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("classpath:rbac/batch-defaults.yaml");
+            });
+        }
+        runner.withPropertyValues("spring.batch.job.enabled=false",
+                        "spring.batch.jdbc.table-prefix=${rbac.batch.schema}.batch_")
+                .run(context -> assertThat(context).hasNotFailed());
     }
 }

@@ -54,6 +54,11 @@ public class ScheduledJobRunner implements SmartInitializingSingleton, Disposabl
         scheduler = new ThreadPoolTaskScheduler();
         scheduler.setPoolSize(poolSize);
         scheduler.setThreadNamePrefix("batch-scheduler-");
+        // On shutdown a running job finishes (within Boot's 30 s shutdown phase) instead of being interrupted and left
+        // STARTED; fires the cron has scheduled but not started are dropped rather than waited for.
+        scheduler.setWaitForTasksToCompleteOnShutdown(true);
+        scheduler.setAwaitTerminationSeconds(25);
+        scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
         scheduler.initialize();
         schedules.forEach((name, schedule) -> {
             if (schedule.enabled()) {

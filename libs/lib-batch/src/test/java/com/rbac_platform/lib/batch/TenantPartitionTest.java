@@ -165,6 +165,21 @@ class TenantPartitionTest {
     }
 
     @Test
+    void theCallersMdcTenantIsRestoredAfterThePartitions() {
+        // Partitions run on the launching thread, which may itself be inside a TenantScope.
+        MDC.put(TenantScope.MDC_KEY, "caller-tenant");
+        try {
+            JobExecution execution = launcher.launch("tasklet-fan-out", Map.of("run", UUID.randomUUID().toString()));
+
+            assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
+            assertThat(sightings).contains(new Sighting(tenantA.toString(), emailA, tenantA.toString()));
+            assertThat(MDC.get(TenantScope.MDC_KEY)).isEqualTo("caller-tenant");
+        } finally {
+            MDC.remove(TenantScope.MDC_KEY);
+        }
+    }
+
+    @Test
     void chunkTransactionsSeeOnlyTheirTenant() {
         JobExecution execution = launcher.launch("chunk-fan-out", Map.of("run", UUID.randomUUID().toString()));
 

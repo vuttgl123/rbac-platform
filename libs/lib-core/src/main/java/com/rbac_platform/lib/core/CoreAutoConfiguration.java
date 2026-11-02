@@ -7,6 +7,8 @@ import com.rbac_platform.lib.core.event.EventDispatcher;
 import com.rbac_platform.lib.core.event.EventHandler;
 import com.rbac_platform.lib.core.event.EventHandlerRegistry;
 import com.rbac_platform.lib.core.event.EventProperties;
+import com.rbac_platform.lib.core.http.HttpClientProperties;
+import com.rbac_platform.lib.core.http.ServiceRestClients;
 import com.rbac_platform.lib.core.logging.RequestLoggingFilter;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -23,7 +25,7 @@ import tools.jackson.databind.json.JsonMapper;
  * makes ours back off.
  */
 @AutoConfiguration(before = ErrorMvcAutoConfiguration.class)
-@EnableConfigurationProperties(EventProperties.class)
+@EnableConfigurationProperties({EventProperties.class, HttpClientProperties.class})
 public class CoreAutoConfiguration {
 
     @Bean
@@ -60,5 +62,11 @@ public class CoreAutoConfiguration {
     @ConditionalOnMissingBean
     EventDispatcher eventDispatcher(EventHandlerRegistry registry, EventProperties properties) {
         return new EventDispatcher(registry, properties.unhandled());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    ServiceRestClients serviceRestClients(HttpClientProperties properties) {
+        return new ServiceRestClients(properties);
     }
 }

@@ -37,9 +37,11 @@ public record SecurityProperties(
         if (tenantCacheTtl == null || tenantCacheTtl.isNegative() || tenantCacheTtl.isZero()) {
             throw new IllegalArgumentException("rbac.security.tenant-cache-ttl must be positive");
         }
-        if (internalToken == null || internalToken.length() < 32) {
-            throw new IllegalArgumentException(
-                    "rbac.security.internal-token is required and must be at least 32 characters");
+        // Boot leaves an unresolvable ${PLACEHOLDER} as literal text, which would be a publicly known secret.
+        if (internalToken == null || internalToken.isBlank() || internalToken.length() < 32
+                || internalToken.contains("${") || !internalToken.equals(internalToken.strip())) {
+            throw new IllegalArgumentException("rbac.security.internal-token is required: at least 32 characters, "
+                    + "no unresolved ${...} placeholder, no leading or trailing whitespace");
         }
         publicPaths = publicPaths == null ? List.of() : List.copyOf(publicPaths);
     }

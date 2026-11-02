@@ -42,6 +42,16 @@ class SecurityPropertiesTest {
         assertThat(withToken("x".repeat(32)).internalToken()).hasSize(32);
     }
 
+    @Test
+    void unresolvedPlaceholderAndWhitespaceAreRejected() {
+        for (String bad : new String[] {"${RBAC_INTERNAL_TOKEN_THAT_IS_LONG_ENOUGH_TO_PASS}", " " + "x".repeat(40),
+                "x".repeat(40) + " ", " ".repeat(40)}) {
+            assertThatThrownBy(() -> withToken(bad))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("rbac.security.internal-token");
+        }
+    }
+
     private static SecurityProperties withToken(String token) {
         return new SecurityProperties("https://id.example.com/t/", "rbac-api", List.of(), Duration.ofSeconds(30),
                 token, null);

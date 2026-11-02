@@ -66,6 +66,8 @@ class InternalTokenFilterTest {
         assertThat(response.headers().firstValue("Content-Type").orElse("")).startsWith("application/problem+json");
         JsonNode body = json.readTree(response.body());
         assertThat(body.get("code").asString()).isEqualTo("unauthenticated");
+        assertThat(body.get("requestId")).isNotNull();
+        assertThat(body.get("requestId").asString()).isNotBlank();
         assertThat(response.body()).doesNotContain("reached");
     }
 
@@ -104,6 +106,33 @@ class InternalTokenFilterTest {
                 c -> Sql.one(c, String.class, "select slug from tenancy.tenants where id = ?", tenant));
 
         assertThat(ping(SECRET, issuer.token(slug).tenant(tenant).sign()).statusCode()).isEqualTo(200);
+    }
+
+    /** Sends the request line verbatim: java.net.http would normalise some of these paths. */
+    private String rawStatusAndBody(String rawPath, String bearer) throws Exception {
+        try (java.net.Socket socket = new java.net.Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            String request = "GET " + rawPath + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+                    + "Authorization: Bearer " + bearer + "\r\n\r\n";
+            socket.getOutputStream().write(request.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            socket.getOutputStream().flush();
+            return new String(socket.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"//internal/test/ping", "/x/../internal/test/ping",
+            "/internal;a=b/test/ping", "/internal%2Ftest/ping", "/INTERNAL/test/ping", "/internal/test/ping/"})
+    void pathTrickeryNeverReachesTheControllerWithoutTheToken(String rawPath) throws Exception {
+        UUID tenant = MigratedDatabase.get().insertTenant();
+        String slug = MigratedDatabase.get().inTx(null, null,
+                c -> Sql.one(c, String.class, "select slug from tenancy.tenants where id = ?", tenant));
+
+        String response = rawStatusAndBody(rawPath, issuer.token(slug).tenant(tenant).sign());
+
+        assertThat(response).startsWith("HTTP/1.1 ");
+        assertThat(response.split(" ")[1]).as(response).isNotEqualTo("200");
+        assertThat(response.substring(response.indexOf("\r\n\r\n") + 4)).doesNotContain("reached");
     }
 
     @Configuration

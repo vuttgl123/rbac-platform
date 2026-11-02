@@ -1,5 +1,7 @@
 package com.rbac_platform.lib.core;
 
+import com.rbac_platform.lib.core.error.ApiExceptionHandler;
+import com.rbac_platform.lib.core.error.ProblemWriter;
 import com.rbac_platform.lib.core.error.RequestIdErrorAttributes;
 import com.rbac_platform.lib.core.event.EventDispatcher;
 import com.rbac_platform.lib.core.event.EventHandler;
@@ -13,6 +15,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.webmvc.autoconfigure.error.ErrorMvcAutoConfiguration;
 import org.springframework.boot.webmvc.error.ErrorAttributes;
 import org.springframework.context.annotation.Bean;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Beans every service gets by having lib-core on the classpath. Ordered before Boot's error configuration
@@ -33,6 +36,18 @@ public class CoreAutoConfiguration {
     @ConditionalOnMissingBean(ErrorAttributes.class)
     RequestIdErrorAttributes errorAttributes() {
         return new RequestIdErrorAttributes();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    ProblemWriter problemWriter(ObjectProvider<JsonMapper> json) {
+        return new ProblemWriter(json.getIfAvailable(() -> JsonMapper.builder().build()));
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    ApiExceptionHandler apiExceptionHandler(ProblemWriter problems) {
+        return new ApiExceptionHandler(problems);
     }
 
     @Bean

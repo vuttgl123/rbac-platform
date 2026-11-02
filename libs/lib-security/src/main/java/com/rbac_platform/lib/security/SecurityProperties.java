@@ -1,5 +1,6 @@
 package com.rbac_platform.lib.security;
 
+import com.rbac_platform.lib.core.config.Secrets;
 import java.time.Duration;
 import java.util.List;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -37,12 +38,7 @@ public record SecurityProperties(
         if (tenantCacheTtl == null || tenantCacheTtl.isNegative() || tenantCacheTtl.isZero()) {
             throw new IllegalArgumentException("rbac.security.tenant-cache-ttl must be positive");
         }
-        // Boot leaves an unresolvable ${PLACEHOLDER} as literal text, which would be a publicly known secret.
-        if (internalToken == null || internalToken.isBlank() || internalToken.length() < 32
-                || internalToken.contains("${") || !internalToken.equals(internalToken.strip())) {
-            throw new IllegalArgumentException("rbac.security.internal-token is required: at least 32 characters, "
-                    + "no unresolved ${...} placeholder, no leading or trailing whitespace");
-        }
+        Secrets.requireSecret("rbac.security.internal-token", internalToken);
         publicPaths = publicPaths == null ? List.of() : List.copyOf(publicPaths);
     }
 

@@ -1,6 +1,7 @@
 package com.rbac_platform.lib.outbox;
 
 import com.rbac_platform.lib.core.CoreAutoConfiguration;
+import com.rbac_platform.lib.core.config.Secrets;
 import com.rbac_platform.lib.core.event.EventDispatcher;
 import com.rbac_platform.lib.core.http.ServiceRestClients;
 import com.rbac_platform.lib.db.DbAutoConfiguration;
@@ -40,7 +41,6 @@ import tools.jackson.databind.json.JsonMapper;
 public class OutboxAutoConfiguration {
 
     private static final String PUBLISHER = "rbac.outbox.publisher";
-    private static final int MIN_TOKEN_LENGTH = 32;
     private static final String SHUTDOWN_PHASE_TIMEOUT = "spring.lifecycle.timeout-per-shutdown-phase";
     private static final Duration DEFAULT_SHUTDOWN_PHASE_TIMEOUT = Duration.ofSeconds(30);
 
@@ -84,10 +84,7 @@ public class OutboxAutoConfiguration {
         if (http.url() == null || http.url().isBlank()) {
             throw new IllegalStateException("rbac.outbox.http.url is required when " + PUBLISHER + "=http");
         }
-        if (http.internalToken() == null || http.internalToken().length() < MIN_TOKEN_LENGTH) {
-            throw new IllegalStateException("rbac.outbox.http.internal-token must be at least " + MIN_TOKEN_LENGTH
-                    + " characters when " + PUBLISHER + "=http");
-        }
+        Secrets.requireSecret("rbac.outbox.http.internal-token", http.internalToken());
         return new HttpOutboxPublisher(clients.create(http.url()), http.internalToken());
     }
 

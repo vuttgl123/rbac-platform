@@ -78,6 +78,15 @@ class OutboxAutoConfigurationTest {
     }
 
     @Test
+    void httpPublisherRejectsUnresolvedPlaceholderToken() {
+        runner.withPropertyValues("rbac.outbox.publisher=http", "rbac.outbox.http.url=http://localhost:1/e",
+                "rbac.outbox.http.internal-token=${AUDIT_INTERNAL_TOKEN_SECRET_VALUE}").run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context).getFailure().hasStackTraceContaining("rbac.outbox.http.internal-token");
+                });
+    }
+
+    @Test
     void httpPublisherIsSelectedByName() {
         runner.withPropertyValues("rbac.outbox.publisher=http", "rbac.outbox.http.url=http://localhost:1/e",
                         "rbac.outbox.http.internal-token=" + "t".repeat(32))

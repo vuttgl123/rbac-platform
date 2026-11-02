@@ -15,8 +15,9 @@ import tools.jackson.databind.JsonNode;
  * relay publishes one at a time; the receiving endpoint accepts a list all the same.
  *
  * <p>Retry classification: delivered only when the receiver lists the event id in {@code accepted}; a 2xx without it,
- * 408, 429, 5xx and network failures are thrown as they are so the relay retries; any other 4xx will never succeed on
- * a retry, so it is thrown as {@link NonRetryableEventException} and the row is buried. The token and the payload are
+ * 408, 429, 401, 403, 404, 5xx and network failures are thrown so the relay retries (status failures as an
+ * exception carrying only the status, never the response body); any other 4xx will never succeed on a retry, so it
+ * is thrown as {@link NonRetryableEventException} and the row is buried. The token and the payload are
  * never logged or put into exception messages.
  */
 public class HttpOutboxPublisher implements OutboxPublisher {
@@ -52,15 +53,23 @@ public class HttpOutboxPublisher implements OutboxPublisher {
                     .body(JsonNode.class);
         } catch (RestClientResponseException e) {
             int status = e.getStatusCode().value();
-            boolean retryable = status >= 500 || status == 408 || status == 429;
-            if (retryable || !e.getStatusCode().is4xxClientError()) {
-                throw e;
+            if (isRetryable(status)) {
+                // No cause: the relay stores the message, and a response body may echo what was sent.
+                throw new IllegalStateException("Event delivery failed with status " + status);
             }
-            throw new NonRetryableEventException("Event rejected with status " + status, e);
+            throw new NonRetryableEventException("Event rejected with status " + status);
         }
         if (!accepted(response, event)) {
             throw new IllegalStateException("Event " + event.id() + " was not acknowledged by the receiver");
         }
+    }
+
+    /**
+     * 401, 403 and 404 mean a wrong token or URL, typically after a secret rotation: retried, so the events survive
+     * until the configuration is fixed (max-attempts still buries them eventually).
+     */
+    private static boolean isRetryable(int status) {
+        return status >= 500 || status == 408 || status == 429 || status == 401 || status == 403 || status == 404;
     }
 
     private static boolean accepted(JsonNode response, EventEnvelope event) {

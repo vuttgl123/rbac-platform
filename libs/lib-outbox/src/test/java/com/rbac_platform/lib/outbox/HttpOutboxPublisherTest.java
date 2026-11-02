@@ -20,6 +20,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.web.client.ResourceAccessException;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -96,25 +97,62 @@ class HttpOutboxPublisherTest {
     @Test
     void okWithoutEventIdIsRetryable() throws Exception {
         HttpOutboxPublisher publisher = serve(200, "{\"accepted\":[]}");
-        assertThatThrownBy(() -> publisher.publish(event)).isNotInstanceOf(NonRetryableEventException.class);
+        assertThatThrownBy(() -> publisher.publish(event)).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("was not acknowledged");
     }
 
     @Test
     void serverErrorIsRetryable() throws Exception {
         HttpOutboxPublisher publisher = serve(503, "{}");
-        assertThatThrownBy(() -> publisher.publish(event)).isNotInstanceOf(NonRetryableEventException.class);
+        assertThatThrownBy(() -> publisher.publish(event)).isInstanceOf(IllegalStateException.class)
+                .isNotInstanceOf(NonRetryableEventException.class)
+                .hasMessage("Event delivery failed with status 503");
     }
 
     @Test
     void tooManyRequestsIsRetryable() throws Exception {
         HttpOutboxPublisher publisher = serve(429, "{}");
-        assertThatThrownBy(() -> publisher.publish(event)).isNotInstanceOf(NonRetryableEventException.class);
+        assertThatThrownBy(() -> publisher.publish(event)).isInstanceOf(IllegalStateException.class)
+                .isNotInstanceOf(NonRetryableEventException.class)
+                .hasMessage("Event delivery failed with status 429");
     }
 
     @Test
     void requestTimeoutIsRetryable() throws Exception {
         HttpOutboxPublisher publisher = serve(408, "{}");
-        assertThatThrownBy(() -> publisher.publish(event)).isNotInstanceOf(NonRetryableEventException.class);
+        assertThatThrownBy(() -> publisher.publish(event)).isInstanceOf(IllegalStateException.class)
+                .isNotInstanceOf(NonRetryableEventException.class)
+                .hasMessage("Event delivery failed with status 408");
+    }
+
+    @Test
+    void unauthorizedIsRetryable() throws Exception {
+        HttpOutboxPublisher publisher = serve(401, "{}");
+        assertThatThrownBy(() -> publisher.publish(event)).isInstanceOf(IllegalStateException.class)
+                .isNotInstanceOf(NonRetryableEventException.class)
+                .hasMessage("Event delivery failed with status 401");
+    }
+
+    @Test
+    void forbiddenIsRetryable() throws Exception {
+        HttpOutboxPublisher publisher = serve(403, "{}");
+        assertThatThrownBy(() -> publisher.publish(event)).isInstanceOf(IllegalStateException.class)
+                .isNotInstanceOf(NonRetryableEventException.class)
+                .hasMessage("Event delivery failed with status 403");
+    }
+
+    @Test
+    void notFoundIsRetryable() throws Exception {
+        HttpOutboxPublisher publisher = serve(404, "{}");
+        assertThatThrownBy(() -> publisher.publish(event)).isInstanceOf(IllegalStateException.class)
+                .isNotInstanceOf(NonRetryableEventException.class)
+                .hasMessage("Event delivery failed with status 404");
+    }
+
+    @Test
+    void retryableFailureDoesNotCarryTheResponseBody() throws Exception {
+        HttpOutboxPublisher publisher = serve(503, "SECRET-ECHO");
+        assertThatThrownBy(() -> publisher.publish(event)).hasMessageNotContaining("SECRET-ECHO").hasNoCause();
     }
 
     @Test
@@ -131,6 +169,6 @@ class HttpOutboxPublisherTest {
         int port = closed.getAddress().getPort();
         closed.stop(0);
         HttpOutboxPublisher publisher = publisher("http://127.0.0.1:" + port + PATH);
-        assertThatThrownBy(() -> publisher.publish(event)).isNotInstanceOf(NonRetryableEventException.class);
+        assertThatThrownBy(() -> publisher.publish(event)).isInstanceOf(ResourceAccessException.class);
     }
 }

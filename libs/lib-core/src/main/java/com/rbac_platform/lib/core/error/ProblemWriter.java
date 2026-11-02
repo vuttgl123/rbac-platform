@@ -7,7 +7,9 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
@@ -42,13 +44,26 @@ public class ProblemWriter {
         return problem;
     }
 
+    /** Flattens the problem into a plain map so the output does not depend on the mapper's ProblemDetail mixin. */
+    private static Map<String, Object> body(ProblemDetail problem) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("type", problem.getType().toString());
+        body.put("title", problem.getTitle());
+        body.put("status", problem.getStatus());
+        body.put("detail", problem.getDetail());
+        if (problem.getProperties() != null) {
+            body.putAll(problem.getProperties());
+        }
+        return body;
+    }
+
     public void write(HttpServletRequest request, HttpServletResponse response, HttpStatus status, String code,
             String detail) {
         response.setStatus(status.value());
         response.setContentType(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
         try {
-            response.getOutputStream().write(json.writeValueAsBytes(problem(request, status, code, detail, List.of())));
+            response.getOutputStream().write(json.writeValueAsBytes(body(problem(request, status, code, detail, List.of()))));
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }

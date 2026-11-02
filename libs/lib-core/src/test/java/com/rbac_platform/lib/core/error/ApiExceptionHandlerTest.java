@@ -92,6 +92,16 @@ class ApiExceptionHandlerTest {
     }
 
     @Test
+    void missingHeaderIsValidationError() throws Exception {
+        assertProblem(send("GET", "/test/header", null), 400, "validation_failed");
+    }
+
+    @Test
+    void responseStatusExceptionKeepsItsStatus() throws Exception {
+        assertProblem(send("GET", "/test/denied", null), 403, "forbidden");
+    }
+
+    @Test
     void unexpectedErrorHidesInternals() throws Exception {
         HttpResponse<String> response = send("GET", "/test/boom", null);
 

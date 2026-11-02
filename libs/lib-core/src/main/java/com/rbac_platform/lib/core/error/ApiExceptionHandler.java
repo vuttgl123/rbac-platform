@@ -10,6 +10,7 @@ import org.springframework.context.MessageSourceResolvable;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
+import org.springframework.web.ErrorResponse;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.FieldError;
@@ -87,9 +88,45 @@ public class ApiExceptionHandler {
     }
 
     @ExceptionHandler(Exception.class)
-    ResponseEntity<ProblemDetail> unexpected(Exception e, HttpServletRequest request) {
+    ResponseEntity<ProblemDetail> unexpected(Exception e, HttpServletRequest request) throws Exception {
+        if (isSecurityException(e)) {
+            throw e; // lib-core has no Spring Security dependency; let the security filter chain answer
+        }
+        if (e instanceof ErrorResponse errorResponse) {
+            HttpStatus status = HttpStatus.resolve(errorResponse.getStatusCode().value());
+            if (status == null) {
+                status = errorResponse.getStatusCode().is4xxClientError()
+                        ? HttpStatus.BAD_REQUEST : HttpStatus.INTERNAL_SERVER_ERROR;
+            }
+            if (status.is5xxServerError()) {
+                LOG.error("Server error for {} {}", request.getMethod(), request.getRequestURI(), e);
+                return respond(request, status, ErrorCodes.INTERNAL_ERROR, "Unexpected error", List.of());
+            }
+            return respond(request, status, codeFor(status), "Request failed", List.of());
+        }
         LOG.error("Unhandled exception for {} {}", request.getMethod(), request.getRequestURI(), e);
         return respond(request, HttpStatus.INTERNAL_SERVER_ERROR, ErrorCodes.INTERNAL_ERROR, "Unexpected error", List.of());
+    }
+
+    private static boolean isSecurityException(Throwable e) {
+        for (Class<?> c = e.getClass(); c != null; c = c.getSuperclass()) {
+            String name = c.getName();
+            if (name.equals("org.springframework.security.access.AccessDeniedException")
+                    || name.equals("org.springframework.security.core.AuthenticationException")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String codeFor(HttpStatus status) {
+        return switch (status) {
+            case UNAUTHORIZED -> ErrorCodes.UNAUTHENTICATED;
+            case FORBIDDEN -> ErrorCodes.FORBIDDEN;
+            case NOT_FOUND -> ErrorCodes.NOT_FOUND;
+            case METHOD_NOT_ALLOWED -> ErrorCodes.METHOD_NOT_ALLOWED;
+            default -> ErrorCodes.VALIDATION_FAILED;
+        };
     }
 
     private ResponseEntity<ProblemDetail> respond(HttpServletRequest request, HttpStatus status, String code,

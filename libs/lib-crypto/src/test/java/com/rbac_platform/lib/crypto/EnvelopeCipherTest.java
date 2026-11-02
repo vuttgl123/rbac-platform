@@ -53,4 +53,14 @@ class EnvelopeCipherTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("32 bytes");
     }
+
+    @Test
+    void invalidBase64DoesNotLeakInputInAnyCauseMessage() {
+        String bad = "abc?defSECRETghij";
+        Throwable t = org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> Kek.fromBase64("env-1", bad));
+        for (; t != null; t = t.getCause()) {
+            assertThat(String.valueOf(t.getMessage())).doesNotContain(bad).doesNotContain("?").doesNotContain("SECRET");
+        }
+    }
 }

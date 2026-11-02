@@ -21,7 +21,8 @@ public record Kek(String id, SecretKey key) {
         try {
             raw = Base64.getDecoder().decode(base64.trim());
         } catch (IllegalArgumentException e) {
-            throw new IllegalArgumentException("rbac.crypto.kek must be valid base64", e);
+            // Deliberately not chained: the decoder's message quotes the offending character of the key.
+            throw new IllegalArgumentException("rbac.crypto.kek must be valid base64");
         }
         try {
             if (raw.length != KEY_BYTES) {

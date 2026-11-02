@@ -11,4 +11,10 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  */
 @ConfigurationProperties("rbac.crypto")
 public record CryptoProperties(String kek, @DefaultValue("env-1") String kekId) {
+
+    /** The generated toString would print the key into logs and error reports. */
+    @Override
+    public String toString() {
+        return "CryptoProperties[kek=" + (kek == null ? "null" : "***") + ", kekId=" + kekId + "]";
+    }
 }

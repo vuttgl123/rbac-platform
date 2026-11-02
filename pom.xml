@@ -21,6 +21,7 @@
 		<module>libs/lib-outbox</module>
 		<module>libs/lib-batch</module>
 		<module>libs/lib-crypto</module>
+		<module>libs/lib-security</module>
 		<module>db-migrations</module>
 		<module>test-support</module>
 		<module>services/identity-service</module>
@@ -57,6 +58,11 @@
 			<dependency>
 				<groupId>com.rbac_platform</groupId>
 				<artifactId>lib-crypto</artifactId>
+				<version>${project.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>com.rbac_platform</groupId>
+				<artifactId>lib-security</artifactId>
 				<version>${project.version}</version>
 			</dependency>
 			<dependency>

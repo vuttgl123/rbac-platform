@@ -38,7 +38,7 @@ public final class TokenValidators {
     /**
      * Issuer equals {@code issuer}; {@code exp} present and not past (30 s skew), {@code nbf} not in the future;
      * {@code aud} contains {@code audience}; header {@code typ} is {@code at+jwt}; {@code tid} and {@code sub}
-     * (and {@code sid} when present) are UUIDs; the tenant {@code tid} is active and its slug is {@code slug}, the
+     * (and {@code sid} when present) are UUIDs; {@code tid} is the active tenant that owns {@code slug}, the
      * issuer's own. The tenant lookup runs only when every other check passed.
      */
     public static OAuth2TokenValidator<Jwt> accessToken(String issuer, String slug, String audience,

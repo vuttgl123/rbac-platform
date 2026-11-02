@@ -50,8 +50,7 @@ public class RbacSecurityAutoConfiguration {
     @ConditionalOnMissingBean
     TenantJwtDecoders tenantJwtDecoders(SecurityProperties properties, TenantStatusCache tenants,
             HttpClientProperties http) {
-        return new TenantJwtDecoders(properties.issuerPrefix(), properties.audience(), tenants,
-                TenantJwtDecoders.restOperations(http));
+        return new TenantJwtDecoders(properties.issuerPrefix(), properties.audience(), tenants, http);
     }
 
     /** A bean, not just chain configuration, so that Boot's UserDetailsServiceAutoConfiguration backs off. */
@@ -93,7 +92,9 @@ public class RbacSecurityAutoConfiguration {
                 .requestCache(AbstractHttpConfigurer::disable)
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(requests -> {
-                    requests.requestMatchers(HttpMethod.GET, "/actuator/health").permitAll();
+                    requests.requestMatchers(HttpMethod.GET, "/actuator/health", "/actuator/health/**").permitAll();
+                    // No tenant token may read the other actuator endpoints (env, configprops, ...).
+                    requests.requestMatchers("/actuator/**").denyAll();
                     requests.requestMatchers("/error").permitAll();
                     // Fails closed until the internal-token filter guards /internal/** (user tokens never open it).
                     requests.requestMatchers("/internal/**").denyAll();
@@ -119,12 +120,23 @@ public class RbacSecurityAutoConfiguration {
     }
 
     @Bean
-    WebMvcConfigurer callerArgumentResolverConfigurer(CallerArgumentResolver callerArgumentResolver) {
-        return new WebMvcConfigurer() {
-            @Override
-            public void addArgumentResolvers(List<HandlerMethodArgumentResolver> resolvers) {
-                resolvers.add(callerArgumentResolver);
-            }
-        };
+    @ConditionalOnMissingBean
+    CallerWebMvcConfigurer callerWebMvcConfigurer(CallerArgumentResolver callerArgumentResolver) {
+        return new CallerWebMvcConfigurer(callerArgumentResolver);
+    }
+
+    /** Registers the {@link CallerArgumentResolver} with Spring MVC; its own type so a service can replace it. */
+    public static class CallerWebMvcConfigurer implements WebMvcConfigurer {
+
+        private final CallerArgumentResolver callerArgumentResolver;
+
+        public CallerWebMvcConfigurer(CallerArgumentResolver callerArgumentResolver) {
+            this.callerArgumentResolver = callerArgumentResolver;
+        }
+
+        @Override
+        public void addArgumentResolvers(List<HandlerMethodArgumentResolver> resolvers) {
+            resolvers.add(callerArgumentResolver);
+        }
     }
 }

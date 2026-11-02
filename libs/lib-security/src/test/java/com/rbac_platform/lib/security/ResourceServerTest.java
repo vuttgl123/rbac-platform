@@ -13,6 +13,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
@@ -173,15 +177,74 @@ class ResourceServerTest {
 
     @Test
     void unknownSlugIs401() throws Exception {
-        issuer.refuse("ghost");
+        issuer.refuse(slug); // the tenant exists locally, but identity does not know it
 
-        assertUnauthenticated(get("/test/whoami", issuer.token("ghost").tenant(tenantId).sign()));
+        assertUnauthenticated(get("/test/whoami", issuer.token(slug).tenant(tenantId).sign()));
+    }
+
+    @Test
+    void slugsWithoutActiveTenantNeverReachIdentity() throws Exception {
+        String warmToken = issuer.token(slug).tenant(tenantId).sign();
+        assertThat(get("/test/whoami", warmToken).statusCode()).isEqualTo(200);
+
+        int discoveries = 0;
+        for (int i = 0; i < 50; i++) {
+            String unknown = "nobody-" + i + "-" + UUID.randomUUID().toString().substring(0, 8);
+            assertUnauthenticated(get("/test/whoami", issuer.token(unknown).tenant(tenantId).sign()));
+            discoveries += issuer.discoveryRequests(unknown);
+        }
+        UUID suspended = MigratedDatabase.get().insertTenant();
+        MigratedDatabase.get().inTx(null, null,
+                c -> Sql.exec(c, "update tenancy.tenants set status = 'suspended' where id = ?", suspended));
+        assertUnauthenticated(get("/test/whoami", issuer.token(slugOf(suspended)).tenant(suspended).sign()));
+        discoveries += issuer.discoveryRequests(slugOf(suspended));
+
+        assertThat(discoveries).isZero();
+        assertThat(get("/test/whoami", warmToken).statusCode()).isEqualTo(200);
+        assertThat(issuer.discoveryRequests(slug)).isEqualTo(1);
+    }
+
+    @Test
+    void unknownKeyIdsDoNotHammerTheJwks() throws Exception {
+        assertThat(get("/test/whoami", issuer.token(slug).tenant(tenantId).sign()).statusCode()).isEqualTo(200);
+        int fetched = issuer.jwksRequests(slug);
+
+        for (int i = 0; i < 20; i++) {
+            String token = issuer.token(slug).tenant(tenantId).keyId(UUID.randomUUID().toString()).sign();
+            assertUnauthenticated(get("/test/whoami", token));
+        }
+
+        assertThat(issuer.jwksRequests(slug) - fetched).isLessThanOrEqualTo(1);
+    }
+
+    @Test
+    void hangingJwksIs401QuicklyForConcurrentRequests() throws Exception {
+        issuer.hangJwks(slug);
+        String token = issuer.token(slug).tenant(tenantId).sign();
+
+        long start = System.nanoTime();
+        List<CompletableFuture<HttpResponse<String>>> responses = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            responses.add(CompletableFuture.supplyAsync(() -> {
+                try {
+                    return get("/test/whoami", token);
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            }));
+        }
+        for (CompletableFuture<HttpResponse<String>> response : responses) {
+            assertUnauthenticated(response.get(20, TimeUnit.SECONDS));
+        }
+        Duration elapsed = Duration.ofNanos(System.nanoTime() - start);
+
+        assertThat(elapsed).isLessThan(Duration.ofSeconds(5));
     }
 
     @Test
     void hangingDiscoveryIs401Quickly() throws Exception {
-        issuer.hang("slow");
-        String token = issuer.token("slow").tenant(tenantId).sign();
+        issuer.hang(slug);
+        String token = issuer.token(slug).tenant(tenantId).sign();
 
         long start = System.nanoTime();
         HttpResponse<String> response = get("/test/whoami", token);
@@ -240,6 +303,13 @@ class ResourceServerTest {
         assertThat(withToken.body()).doesNotContain("reached");
 
         assertUnauthenticated(get("/internal/test/anything", null));
+    }
+
+    @Test
+    void healthIsOpenButOtherActuatorEndpointsAreClosed() throws Exception {
+        assertThat(get("/actuator/health/liveness", null).statusCode()).isNotEqualTo(401).isIn(200, 404);
+
+        assertProblem(get("/actuator/env", issuer.token(slug).tenant(tenantId).sign()), 403, "forbidden");
     }
 
     @Test

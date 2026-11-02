@@ -2,28 +2,42 @@ package com.rbac_platform.lib.security;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.rbac_platform.lib.core.http.HttpClientProperties;
 import java.time.Duration;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
-import org.springframework.web.client.RestTemplate;
 
 /** Which issuers get a decoder at all; no network is involved until a decoder sees a token. */
 class TenantJwtDecodersTest {
 
     private static final String PREFIX = "https://id.example.com/t/";
+    private static final UUID TENANT = UUID.randomUUID();
 
-    private final TenantJwtDecoders decoders =
-            new TenantJwtDecoders(PREFIX, "rbac-api", new TenantStatusCache(null, Duration.ofSeconds(30)), new RestTemplate());
+    /** Every syntactically valid slug except "gone" belongs to an active tenant. */
+    private static final class AllActive extends TenantStatusCache {
+        AllActive() {
+            super(null, Duration.ofSeconds(30));
+        }
+
+        @Override
+        public UUID activeTenant(String slug) {
+            return slug.equals("gone") ? null : TENANT;
+        }
+    }
+
+    private final TenantJwtDecoders decoders = new TenantJwtDecoders(PREFIX, "rbac-api", new AllActive(),
+            new HttpClientProperties(Duration.ofSeconds(1), Duration.ofSeconds(2)));
 
     @Test
-    void prefixPlusSlugIsTrusted() {
+    void prefixPlusSlugOfActiveTenantIsTrusted() {
         assertThat(decoders.decoderFor(PREFIX + "acme")).isNotNull();
         assertThat(decoders.decoderFor(PREFIX + "a")).isNotNull();
         assertThat(decoders.decoderFor(PREFIX + "acme-2")).isNotNull();
     }
 
     @Test
-    void sameIssuerGetsSameDecoder() {
-        assertThat(decoders.decoderFor(PREFIX + "acme")).isSameAs(decoders.decoderFor(PREFIX + "acme"));
+    void slugWithoutActiveTenantIsNotTrusted() {
+        assertThat(decoders.decoderFor(PREFIX + "gone")).isNull();
     }
 
     @Test

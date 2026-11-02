@@ -56,7 +56,9 @@ public final class TestIssuer implements AutoCloseable {
     private final ECKey foreignKey;
     private final Set<String> refused = ConcurrentHashMap.newKeySet();
     private final Set<String> hanging = ConcurrentHashMap.newKeySet();
+    private final Set<String> hangingJwks = ConcurrentHashMap.newKeySet();
     private final Map<String, AtomicInteger> discoveryRequests = new ConcurrentHashMap<>();
+    private final Map<String, AtomicInteger> jwksRequests = new ConcurrentHashMap<>();
 
     private TestIssuer(HttpServer server, ExecutorService executor, ECKey key, ECKey foreignKey) {
         this.server = server;
@@ -107,9 +109,20 @@ public final class TestIssuer implements AutoCloseable {
         hanging.add(slug);
     }
 
+    /** The JWKS of this slug does not answer for 10 seconds. */
+    public void hangJwks(String slug) {
+        hangingJwks.add(slug);
+    }
+
     /** How many discovery requests this slug has received (refused and hanging ones included). */
     public int discoveryRequests(String slug) {
         AtomicInteger count = discoveryRequests.get(slug);
+        return count == null ? 0 : count.get();
+    }
+
+    /** How many JWKS requests this slug has received (hanging ones included). */
+    public int jwksRequests(String slug) {
+        AtomicInteger count = jwksRequests.get(slug);
         return count == null ? 0 : count.get();
     }
 
@@ -132,17 +145,16 @@ public final class TestIssuer implements AutoCloseable {
             }
             String slug = path.group(1);
             if (path.group(2).equals("jwks.json")) {
+                jwksRequests.computeIfAbsent(slug, s -> new AtomicInteger()).incrementAndGet();
+                if (hangingJwks.contains(slug) && !hang()) {
+                    return;
+                }
                 respond(exchange, 200, new JWKSet(key.toPublicJWK()).toString());
                 return;
             }
             discoveryRequests.computeIfAbsent(slug, s -> new AtomicInteger()).incrementAndGet();
-            if (hanging.contains(slug)) {
-                try {
-                    Thread.sleep(HANG.toMillis());
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return;
-                }
+            if (hanging.contains(slug) && !hang()) {
+                return;
             }
             if (refused.contains(slug)) {
                 respond(exchange, 404, "{}");
@@ -150,6 +162,17 @@ public final class TestIssuer implements AutoCloseable {
             }
             respond(exchange, 200, "{\"issuer\":\"" + issuer(slug) + "\",\"jwks_uri\":\"" + baseUrl + "/t/" + slug
                     + "/.well-known/jwks.json\"}");
+        }
+    }
+
+    /** Sleeps through the hang; false when interrupted (the server is closing). */
+    private static boolean hang() {
+        try {
+            Thread.sleep(HANG.toMillis());
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
         }
     }
 
@@ -170,6 +193,7 @@ public final class TestIssuer implements AutoCloseable {
         private final Map<String, Object> claims = new LinkedHashMap<>();
         private final Set<String> removed = new HashSet<>();
         private String type = "at+jwt";
+        private String keyId = KEY_ID;
         private boolean foreign;
 
         private TokenBuilder(String slug) {
@@ -231,6 +255,12 @@ public final class TestIssuer implements AutoCloseable {
             return this;
         }
 
+        /** The {@code kid} header; signing still uses the issuer's key. */
+        public TokenBuilder keyId(String keyId) {
+            this.keyId = keyId;
+            return this;
+        }
+
         /** Signs with a key the issuer does not publish (same kid, so only the signature check can catch it). */
         public TokenBuilder signedByForeignKey() {
             foreign = true;
@@ -246,7 +276,7 @@ public final class TestIssuer implements AutoCloseable {
             });
             JWSHeader header = new JWSHeader.Builder(JWSAlgorithm.ES256)
                     .type(new JOSEObjectType(type))
-                    .keyID(KEY_ID)
+                    .keyID(keyId)
                     .build();
             SignedJWT jwt = new SignedJWT(header, set.build());
             try {

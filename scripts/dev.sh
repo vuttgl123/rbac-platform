@@ -36,11 +36,24 @@ if [ -z "${RBAC_INTERNAL_TOKEN:-}" ]; then
 fi
 export RBAC_INTERNAL_TOKEN
 
+# Refuse to start on busy ports: a stale process would answer health for the wrong stack.
+DB_PORT=${DEV_DB_PORT:-54329}
+PORTS=("$DB_PORT" 8081 8082 8083)
+[ "$FE" = 1 ] && PORTS+=(5173)
+for p in "${PORTS[@]}"; do
+  if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
+    echo "port $p is already in use" >&2
+    exit 1
+  fi
+done
+
 LOG_TMP=$(mktemp -d)
+NAMES=()
 PGIDS=()
 
 cleanup() {
-  trap - EXIT INT TERM
+  trap '' INT TERM   # a second Ctrl+C must not skip the KILL fallback
+  trap - EXIT
   echo
   echo "Stopping dev stack..."
   # Reverse start order: frontend and services first, database last.
@@ -67,13 +80,31 @@ start() {
     name=$1; log=$2; shift 2
     "$@" 2>&1 | tee "$log" | sed -u "s/^/[$name] /"
   ' _ "$name" "$LOG_TMP/$name.log" "$@" &
+  NAMES+=("$name")
   PGIDS+=("$!")
 }
 
-wait_for() { # <description> <timeout seconds> <command...>
-  local what=$1 limit=$2; shift 2
+pgid_of() { # <name>
+  local i
+  for i in "${!NAMES[@]}"; do
+    [ "${NAMES[$i]}" = "$1" ] && { echo "${PGIDS[$i]}"; return; }
+  done
+}
+
+alive() { kill -0 -- "-$(pgid_of "$1")" 2>/dev/null; }
+
+died() { # <name>: report and fail
+  echo "[$1] exited before becoming healthy" >&2
+  tail -n 30 "$LOG_TMP/$1.log" >&2 2>/dev/null
+  exit 1
+}
+
+# wait_for <process> <description> <timeout seconds> <command...>: also fails fast if the process dies.
+wait_for() {
+  local proc=$1 what=$2 limit=$3; shift 3
   local end=$((SECONDS + limit))
   until "$@"; do
+    alive "$proc" || died "$proc"
     if [ "$SECONDS" -ge "$end" ]; then
       echo "Timed out after ${limit}s waiting for $what" >&2
       exit 1
@@ -84,13 +115,13 @@ wait_for() { # <description> <timeout seconds> <command...>
 
 echo "Starting embedded Postgres ($DB_URL)..."
 start db ./mvnw -q -pl test-support exec:java
-wait_for "DEV DB READY" 120 grep -q 'DEV DB READY' "$LOG_TMP/db.log"
+wait_for db "DEV DB READY" 120 grep -q 'DEV DB READY' "$LOG_TMP/db.log"
 
 for svc in identity authz audit; do
   start "$svc" ./mvnw -q -pl "services/$svc-service" spring-boot:run
 done
-for port in 8081 8082 8083; do
-  wait_for "health on :$port" 180 curl -sf "localhost:$port/actuator/health" -o /dev/null
+for pair in identity:8081 authz:8082 audit:8083; do
+  wait_for "${pair%%:*}" "health on :${pair##*:}" 180 curl -sf "localhost:${pair##*:}/actuator/health" -o /dev/null
 done
 
 if [ "$FE" = 1 ]; then
@@ -108,5 +139,13 @@ $( [ "$FE" = 1 ] && echo "  frontend  http://localhost:5173 (proxies /api/identi
 Ctrl+C stops everything.
 TABLE
 
-# Stay up while any child group is alive (wait returns as soon as one exits).
-wait
+# Stay up until any process group exits, then fall through to cleanup.
+while true; do
+  for i in "${!NAMES[@]}"; do
+    if ! kill -0 -- "-${PGIDS[$i]}" 2>/dev/null; then
+      echo "[${NAMES[$i]}] exited; stopping the rest" >&2
+      exit 1
+    fi
+  done
+  sleep 2
+done

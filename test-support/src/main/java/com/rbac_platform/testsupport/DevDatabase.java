@@ -17,9 +17,9 @@ public final class DevDatabase {
     }
 
     public static void main(String[] args) throws InterruptedException {
-        int port = args.length > 0 ? Integer.parseInt(args[0].trim())
-                : System.getenv("DEV_DB_PORT") != null ? Integer.parseInt(System.getenv("DEV_DB_PORT").trim())
-                : DEFAULT_PORT;
+        String env = System.getenv("DEV_DB_PORT");
+        String raw = args.length > 0 ? args[0] : env;
+        int port = raw == null || raw.isBlank() ? DEFAULT_PORT : Integer.parseInt(raw.trim());
         // MigratedDatabase registers the shutdown hook that closes Postgres.
         MigratedDatabase db = MigratedDatabase.startStandalone(port);
         for (String role : List.of("identity_app", "authz_app", "audit_app", "rbac_admin")) {

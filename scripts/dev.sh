@@ -21,6 +21,16 @@ if [ "$INSTALL" = 1 ]; then
   ./mvnw -q install -DskipTests || exit 1
 fi
 
+# A fresh checkout has no frontend dependencies; install them before anything starts.
+if [ "$FE" = 1 ] && [ ! -d frontend/node_modules ]; then
+  echo "Installing frontend dependencies..."
+  if [ -f frontend/package-lock.json ]; then
+    npm --prefix frontend ci || exit 1
+  else
+    npm --prefix frontend install || exit 1
+  fi
+fi
+
 # Exported, so they outrank anything in .env (for example Supabase values).
 export DB_URL="jdbc:postgresql://localhost:${DEV_DB_PORT:-54329}/postgres"
 export IDENTITY_DB_USER=identity_app AUTHZ_DB_USER=authz_app AUDIT_DB_USER=audit_app

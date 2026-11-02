@@ -6,12 +6,14 @@ Multi-tenant RBAC platform: three Spring Boot services on one PostgreSQL databas
 
 | Path | Purpose |
 | --- | --- |
-| `libs/lib-core` | Logging (`logback-spring.xml`, request ids), `RequestLoggingFilter`, error responses carrying the request id, the event contracts (`EventHandler`, `EventEnvelope`, `EventDispatcher`) |
+| `libs/lib-core` | Logging (`logback-spring.xml`, request ids), `RequestLoggingFilter`, problem+json errors with `code` and `requestId` (`ApiExceptionHandler` inside Spring MVC, `ProblemErrorController` for `/error`), cursor paging, the event contracts (`EventHandler`, `EventEnvelope`, `EventDispatcher`), `ServiceRestClients` |
 | `libs/lib-db` | Shared data source defaults, `TenantScope`, startup check that the service connects as its own non-bypass role |
 | `libs/lib-outbox` | Transactional outbox: `OutboxWriter` appends events in the caller's tenant transaction, `OutboxRelay` publishes them asynchronously and deletes them once delivered |
 | `libs/lib-batch` | Spring Batch with a per-service job repository, `JobLaunchService`, slot-guarded cron scheduling (`ScheduledJobRunner`), tenant fan-out, `PartitionMaintenanceJob` |
+| `libs/lib-crypto` | `PasswordHasher` (Argon2id), `EnvelopeCipher` (AES-256-GCM under the KEK, each ciphertext bound to its row), `SecureTokens` |
+| `libs/lib-security` | JWT resource server with one issuer per tenant, the `Caller` controller parameter, problem+json 401/403, the `/internal/**` guard (`InternalTokenFilter` in its own filter chain), `AccessChecker` |
 | `db-migrations` | Flyway migrations `V1`-`V13`, the Flyway plugin setup, DB tests with embedded Postgres (also a test-jar) |
-| `test-support` | Test-only helpers (`AppDatabase`, ...) used by the other modules |
+| `test-support` | Shared helpers for tests (`AppDatabase`, `TestIssuer`, ...) and `DevDatabase`, the embedded Postgres that `scripts/dev.sh` runs; never a dependency of service main code |
 | `services/identity-service` | Identity service, port 8081, database role `identity_app` |
 | `services/authz-service` | Authorization service, port 8082, database role `authz_app` |
 | `services/audit-service` | Audit service, port 8083, database role `audit_app` |
@@ -40,12 +42,19 @@ Active only when `rbac.outbox.schema` is set.
 | --- | --- | --- |
 | `schema` | none | Schema that owns the service's `outbox` table; must match `[a-z_][a-z0-9_]*` |
 | `enabled` | `true` | Whether this instance runs the relay |
-| `publisher` | `log` | `log` writes one INFO line per event; `in-process` delivers to the service's own `EventHandler` beans |
+| `publisher` | `log` | `log` writes one INFO line per event; `in-process` delivers to the service's own `EventHandler` beans; `http` posts each event to `http.url` |
 | `batch-size` | `100` | Rows claimed per relay pass (1-1000) |
 | `poll-interval` | `500ms` | Longest wait between passes when no writer wakes the relay |
 | `lease` | `60s` | How long a claimed row is held before another relay may claim it again (at most `1h`) |
 | `max-attempts` | `10` | Deliveries tried before a row is buried |
 | `backoff.initial` / `backoff.max` | `1s` / `5m` | Delay after the first failure, and its ceiling as failures accumulate |
+| `http.url` | none | `http` publisher only (then required): full URL of the receiving endpoint, e.g. `http://localhost:8083/internal/v1/events` |
+| `http.internal-token` | none | `http` publisher only (then required): the receiver's `X-Internal-Token` secret; at least 32 characters, no whitespace |
+
+The `http` publisher counts an event as delivered only when the receiver lists its id in `accepted`. A 2xx without it,
+408, 429, 5xx, network failures and also 401, 403 and 404 are retried with the backoff above: those three usually mean
+a rotated secret or a wrong URL, and retrying keeps the events until the configuration is fixed (they are buried after
+`max-attempts` like any other failure). Any other 4xx is never retried; the row is buried at once.
 
 ### `rbac.batch.*` (lib-batch)
 
@@ -71,6 +80,34 @@ spring:
 | Property | Default | Meaning |
 | --- | --- | --- |
 | `unhandled` | `ignore` | What the dispatcher does with an event no `EventHandler` claims: `ignore` or `fail` |
+
+### `rbac.security.*` (lib-security)
+
+| Property | Default | Meaning |
+| --- | --- | --- |
+| `issuer-prefix` | none (required) | identity's public URL plus `/t/`; absolute http(s) with a host, no empty path segment. A token's `iss` must be this plus one tenant slug |
+| `audience` | `rbac-api` | The `aud` every access token must carry |
+| `public-paths` | empty | Request patterns reachable without a token, besides `GET /actuator/health` and `/error` |
+| `tenant-cache-ttl` | `30s` | How long a tenant's status is cached; a suspended tenant's tokens stop working within it |
+| `internal-token` | none (required) | Shared secret for `/internal/**` (`X-Internal-Token`); at least 32 characters, no whitespace |
+| `authz-url` | none | Base URL of authz-service; when set, an `HttpAccessChecker` asks it for decisions |
+
+`/internal/**` has its own security chain, ordered first: only the internal token opens it. A service that declares its
+own `SecurityFilterChain` replaces the main (bearer-token) chain but keeps that guard.
+
+### `rbac.http.*` (lib-core)
+
+| Property | Default | Meaning |
+| --- | --- | --- |
+| `connect-timeout` | `1s` | Connect timeout of service-to-service calls (`ServiceRestClients`, identity discovery and JWKS) |
+| `read-timeout` | `2s` | Read timeout of those calls |
+
+### `rbac.crypto.*` (lib-crypto)
+
+| Property | Default | Meaning |
+| --- | --- | --- |
+| `kek` | none | Base64 of the 32-byte key-encryption key; without it there is no `EnvelopeCipher` bean. A malformed key fails startup |
+| `kek-id` | `env-1` | Id stored with each ciphertext; change it when the KEK is rotated |
 
 ### Adding a handler
 
@@ -115,7 +152,8 @@ audit on it, then the Vite frontend. The three services share that one database,
 does not give you (each starts a private Postgres). The script first runs `./mvnw -q install -DskipTests`, exports every
 variable the services need (`DB_URL`, the three `*_DB_USER` / `*_DB_PASSWORD` pairs, `IDENTITY_PUBLIC_URL`, `AUTHZ_URL`,
 `RBAC_INTERNAL_TOKEN`), waits for the health endpoints, and prints a table of URLs including the one shared `DB_URL`.
-Exported values outrank `.env`, so a filled-in `.env` (Supabase) is not used.
+Exported values outrank `.env`, so a filled-in `.env` (Supabase) is not used. With the frontend enabled and no
+`frontend/node_modules` yet, it first runs `npm --prefix frontend ci` (`npm install` when there is no lockfile).
 
 | Option | Effect |
 | --- | --- |

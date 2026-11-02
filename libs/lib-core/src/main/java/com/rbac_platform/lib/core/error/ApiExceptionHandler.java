@@ -7,6 +7,8 @@ import java.util.Locale;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.MessageSourceResolvable;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
@@ -27,8 +29,13 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 /**
  * Maps every exception raised inside Spring MVC to a problem response with a stable code. Unexpected errors
  * are logged with their stack and answered with a generic message so no internals leak.
+ *
+ * <p>Lowest precedence because it handles {@link Exception}: a service's own {@code @RestControllerAdvice} must
+ * be ordered above it (any {@code @Order} value lower than {@link Ordered#LOWEST_PRECEDENCE}) to be consulted
+ * first for the exceptions it maps.
  */
 @RestControllerAdvice
+@Order(Ordered.LOWEST_PRECEDENCE)
 public class ApiExceptionHandler {
 
     private static final Logger LOG = LoggerFactory.getLogger(ApiExceptionHandler.class);

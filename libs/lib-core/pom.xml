@@ -10,7 +10,7 @@
 	</parent>
 	<artifactId>lib-core</artifactId>
 	<name>lib-core</name>
-	<description>Cross-cutting web infrastructure for every service: request logging and logback configuration</description>
+	<description>Cross-cutting infrastructure for every service: request ids and logging, problem+json errors (including the /error page), cursor paging, event contracts and service-call clients</description>
 
 	<dependencies>
 		<dependency>

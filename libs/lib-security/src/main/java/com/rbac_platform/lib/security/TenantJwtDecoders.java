@@ -155,7 +155,8 @@ public class TenantJwtDecoders {
                     .jwsAlgorithm(SignatureAlgorithm.ES256)
                     .restOperations(rest)
                     .build();
-            decoder.setJwtValidator(TokenValidators.accessToken(issuer, audience, tenants));
+            String slug = issuer.substring(issuerPrefix.length());
+            decoder.setJwtValidator(TokenValidators.accessToken(issuer, slug, audience, tenants));
             return decoder;
         }
     }

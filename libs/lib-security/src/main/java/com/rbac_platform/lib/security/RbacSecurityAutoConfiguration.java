@@ -94,8 +94,9 @@ public class RbacSecurityAutoConfiguration {
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(requests -> {
                     requests.requestMatchers(HttpMethod.GET, "/actuator/health").permitAll();
-                    // /internal/** is guarded by the internal-token filter, not by user tokens.
-                    requests.requestMatchers("/error", "/internal/**").permitAll();
+                    requests.requestMatchers("/error").permitAll();
+                    // Fails closed until the internal-token filter guards /internal/** (user tokens never open it).
+                    requests.requestMatchers("/internal/**").denyAll();
                     if (!publicPaths.isEmpty()) {
                         requests.requestMatchers(publicPaths.toArray(String[]::new)).permitAll();
                     }

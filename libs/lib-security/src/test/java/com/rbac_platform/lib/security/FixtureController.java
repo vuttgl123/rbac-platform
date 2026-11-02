@@ -28,6 +28,11 @@ class FixtureController {
         return "unreachable";
     }
 
+    @GetMapping("/internal/test/anything")
+    String internal() {
+        return "reached";
+    }
+
     @GetMapping("/test/denied")
     String denied() {
         throw new AccessDeniedException("fixture denies everyone");

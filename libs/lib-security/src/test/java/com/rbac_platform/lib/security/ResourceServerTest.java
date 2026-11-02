@@ -53,12 +53,19 @@ class ResourceServerTest {
     private final JsonMapper json = JsonMapper.builder().build();
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
     private final UUID tenantId = MigratedDatabase.get().insertTenant();
+    // Each tenant's tokens come from its own issuer, {prefix}{slug}.
+    private final String slug = slugOf(tenantId);
 
     @LocalServerPort
     private int port;
 
     @Autowired
     private ApplicationContext context;
+
+    private static String slugOf(UUID tenant) {
+        return MigratedDatabase.get().inTx(null, null,
+                c -> Sql.one(c, String.class, "select slug from tenancy.tenants where id = ?", tenant));
+    }
 
     private HttpResponse<String> get(String path, String token) throws Exception {
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + path))
@@ -88,7 +95,7 @@ class ResourceServerTest {
     void validTokenReachesControllerAsCaller() throws Exception {
         UUID subject = UUID.randomUUID();
         UUID session = UUID.randomUUID();
-        String token = issuer.token("acme").tenant(tenantId).subject(subject).session(session).sign();
+        String token = issuer.token(slug).tenant(tenantId).subject(subject).session(session).sign();
 
         HttpResponse<String> response = get("/test/whoami", token);
 
@@ -110,48 +117,58 @@ class ResourceServerTest {
 
     @Test
     void expiredTokenSaysTokenExpired() throws Exception {
-        String token = issuer.token("acme").tenant(tenantId).expiresAt(Instant.now().minus(Duration.ofMinutes(5))).sign();
+        String token = issuer.token(slug).tenant(tenantId).expiresAt(Instant.now().minus(Duration.ofMinutes(5))).sign();
 
         assertProblem(get("/test/whoami", token), 401, "token_expired");
     }
 
     @Test
     void wrongAudienceIsRejected() throws Exception {
-        assertUnauthenticated(get("/test/whoami", issuer.token("acme").tenant(tenantId).audience("other").sign()));
+        assertUnauthenticated(get("/test/whoami", issuer.token(slug).tenant(tenantId).audience("other").sign()));
     }
 
     @Test
     void challengeTokenIsRejected() throws Exception {
-        assertUnauthenticated(get("/test/whoami", issuer.token("acme").tenant(tenantId).type("challenge+jwt").sign()));
+        assertUnauthenticated(get("/test/whoami", issuer.token(slug).tenant(tenantId).type("challenge+jwt").sign()));
     }
 
     @Test
     void foreignSignatureIsRejected() throws Exception {
-        assertUnauthenticated(get("/test/whoami", issuer.token("acme").tenant(tenantId).signedByForeignKey().sign()));
+        assertUnauthenticated(get("/test/whoami", issuer.token(slug).tenant(tenantId).signedByForeignKey().sign()));
     }
 
     @Test
     void issuerOutsidePrefixIsRejected() throws Exception {
-        String token = issuer.token("acme").tenant(tenantId).claim("iss", "http://evil.example/t/acme").sign();
+        String token = issuer.token(slug).tenant(tenantId).claim("iss", "http://evil.example/t/" + slug).sign();
 
         assertUnauthenticated(get("/test/whoami", token));
     }
 
     @Test
     void nestedPathIssuerIsRejected() throws Exception {
-        String token = issuer.token("acme").tenant(tenantId).claim("iss", issuer.baseUrl() + "/t/acme/extra").sign();
+        String token = issuer.token(slug).tenant(tenantId).claim("iss", issuer.issuer(slug) + "/extra").sign();
 
         assertUnauthenticated(get("/test/whoami", token));
     }
 
     @Test
     void missingTenantClaimIsRejected() throws Exception {
-        assertUnauthenticated(get("/test/whoami", issuer.token("acme").tenant(tenantId).without("tid").sign()));
+        assertUnauthenticated(get("/test/whoami", issuer.token(slug).tenant(tenantId).without("tid").sign()));
     }
 
     @Test
     void nonUuidSubjectIsRejected() throws Exception {
-        assertUnauthenticated(get("/test/whoami", issuer.token("acme").tenant(tenantId).claim("sub", "alice").sign()));
+        assertUnauthenticated(get("/test/whoami", issuer.token(slug).tenant(tenantId).claim("sub", "alice").sign()));
+    }
+
+    @Test
+    void tenantFromAnotherIssuerIsRejected() throws Exception {
+        UUID otherTenant = MigratedDatabase.get().insertTenant();
+        String token = issuer.token(slug).tenant(otherTenant).sign();
+
+        assertUnauthenticated(get("/test/whoami", token));
+        assertThat(get("/test/whoami", issuer.token(slugOf(otherTenant)).tenant(otherTenant).sign()).statusCode())
+                .isEqualTo(200);
     }
 
     @Test
@@ -176,7 +193,7 @@ class ResourceServerTest {
 
     @Test
     void suspendedTenantIsRejectedAfterCacheTtl() throws Exception {
-        String token = issuer.token("acme").tenant(tenantId).sign();
+        String token = issuer.token(slug).tenant(tenantId).sign();
         assertThat(get("/test/whoami", token).statusCode()).isEqualTo(200);
 
         MigratedDatabase.get().inTx(null, null,
@@ -188,10 +205,10 @@ class ResourceServerTest {
 
     @Test
     void discoveryIsFetchedOncePerIssuer() throws Exception {
-        assertThat(get("/test/whoami", issuer.token("once").tenant(tenantId).sign()).statusCode()).isEqualTo(200);
-        assertThat(get("/test/whoami", issuer.token("once").tenant(tenantId).sign()).statusCode()).isEqualTo(200);
+        assertThat(get("/test/whoami", issuer.token(slug).tenant(tenantId).sign()).statusCode()).isEqualTo(200);
+        assertThat(get("/test/whoami", issuer.token(slug).tenant(tenantId).sign()).statusCode()).isEqualTo(200);
 
-        assertThat(issuer.discoveryRequests("once")).isEqualTo(1);
+        assertThat(issuer.discoveryRequests(slug)).isEqualTo(1);
     }
 
     @Test
@@ -209,9 +226,20 @@ class ResourceServerTest {
 
     @Test
     void accessDeniedFromControllerIsForbiddenProblem() throws Exception {
-        String token = issuer.token("acme").tenant(tenantId).sign();
+        String token = issuer.token(slug).tenant(tenantId).sign();
 
         assertProblem(get("/test/denied", token), 403, "forbidden");
+    }
+
+    @Test
+    void internalPathsAreClosedUntilGuarded() throws Exception {
+        String token = issuer.token(slug).tenant(tenantId).sign();
+
+        HttpResponse<String> withToken = get("/internal/test/anything", token);
+        assertProblem(withToken, 403, "forbidden");
+        assertThat(withToken.body()).doesNotContain("reached");
+
+        assertUnauthenticated(get("/internal/test/anything", null));
     }
 
     @Test

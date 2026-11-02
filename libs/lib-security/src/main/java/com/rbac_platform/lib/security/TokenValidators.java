@@ -38,10 +38,11 @@ public final class TokenValidators {
     /**
      * Issuer equals {@code issuer}; {@code exp} present and not past (30 s skew), {@code nbf} not in the future;
      * {@code aud} contains {@code audience}; header {@code typ} is {@code at+jwt}; {@code tid} and {@code sub}
-     * (and {@code sid} when present) are UUIDs; the tenant is active. The tenant lookup runs only when every
-     * other check passed.
+     * (and {@code sid} when present) are UUIDs; the tenant {@code tid} is active and its slug is {@code slug}, the
+     * issuer's own. The tenant lookup runs only when every other check passed.
      */
-    public static OAuth2TokenValidator<Jwt> accessToken(String issuer, String audience, TenantStatusCache tenants) {
+    public static OAuth2TokenValidator<Jwt> accessToken(String issuer, String slug, String audience,
+            TenantStatusCache tenants) {
         OAuth2TokenValidator<Jwt> claims = new DelegatingOAuth2TokenValidator<>(List.of(
                 new JwtIssuerValidator(issuer),
                 TokenValidators::timestamps,
@@ -53,9 +54,9 @@ public final class TokenValidators {
             if (result.hasErrors()) {
                 return result;
             }
-            return tenants.isActive(UUID.fromString(jwt.getClaimAsString("tid")))
+            return tenants.isActive(UUID.fromString(jwt.getClaimAsString("tid")), slug)
                     ? OAuth2TokenValidatorResult.success()
-                    : invalid("tenant is not active");
+                    : invalid("tenant is not active or does not belong to the issuer");
         };
     }
 

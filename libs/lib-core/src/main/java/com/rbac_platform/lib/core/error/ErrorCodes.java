@@ -1,5 +1,7 @@
 package com.rbac_platform.lib.core.error;
 
+import org.springframework.http.HttpStatus;
+
 /** Stable machine-readable error codes carried in the {@code code} field of every problem response. */
 public final class ErrorCodes {
 
@@ -27,5 +29,32 @@ public final class ErrorCodes {
     public static final String METHOD_NOT_ALLOWED = "method_not_allowed";
 
     private ErrorCodes() {
+    }
+
+    /**
+     * The code for a failure known only by its status (a framework or container error, not an {@link ApiException}):
+     * 401 unauthenticated, 403 forbidden, 404 not_found, 405 method_not_allowed, any other 4xx validation_failed,
+     * 5xx internal_error.
+     */
+    public static String forStatus(HttpStatus status) {
+        if (status.is5xxServerError()) {
+            return INTERNAL_ERROR;
+        }
+        return switch (status) {
+            case UNAUTHORIZED -> UNAUTHENTICATED;
+            case FORBIDDEN -> FORBIDDEN;
+            case NOT_FOUND -> NOT_FOUND;
+            case METHOD_NOT_ALLOWED -> METHOD_NOT_ALLOWED;
+            default -> VALIDATION_FAILED;
+        };
+    }
+
+    /** The status for a raw status value; one HttpStatus does not name is treated as 400 (4xx) or 500 (anything else). */
+    public static HttpStatus statusOf(int value) {
+        HttpStatus status = HttpStatus.resolve(value);
+        if (status != null) {
+            return status;
+        }
+        return value >= 400 && value < 500 ? HttpStatus.BAD_REQUEST : HttpStatus.INTERNAL_SERVER_ERROR;
     }
 }

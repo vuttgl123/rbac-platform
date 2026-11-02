@@ -93,16 +93,12 @@ public class ApiExceptionHandler {
             throw e; // lib-core has no Spring Security dependency; let the security filter chain answer
         }
         if (e instanceof ErrorResponse errorResponse) {
-            HttpStatus status = HttpStatus.resolve(errorResponse.getStatusCode().value());
-            if (status == null) {
-                status = errorResponse.getStatusCode().is4xxClientError()
-                        ? HttpStatus.BAD_REQUEST : HttpStatus.INTERNAL_SERVER_ERROR;
-            }
+            HttpStatus status = ErrorCodes.statusOf(errorResponse.getStatusCode().value());
             if (status.is5xxServerError()) {
                 LOG.error("Server error for {} {}", request.getMethod(), request.getRequestURI(), e);
                 return respond(request, status, ErrorCodes.INTERNAL_ERROR, "Unexpected error", List.of());
             }
-            return respond(request, status, codeFor(status), "Request failed", List.of());
+            return respond(request, status, ErrorCodes.forStatus(status), "Request failed", List.of());
         }
         LOG.error("Unhandled exception for {} {}", request.getMethod(), request.getRequestURI(), e);
         return respond(request, HttpStatus.INTERNAL_SERVER_ERROR, ErrorCodes.INTERNAL_ERROR, "Unexpected error", List.of());
@@ -117,16 +113,6 @@ public class ApiExceptionHandler {
             }
         }
         return false;
-    }
-
-    private static String codeFor(HttpStatus status) {
-        return switch (status) {
-            case UNAUTHORIZED -> ErrorCodes.UNAUTHENTICATED;
-            case FORBIDDEN -> ErrorCodes.FORBIDDEN;
-            case NOT_FOUND -> ErrorCodes.NOT_FOUND;
-            case METHOD_NOT_ALLOWED -> ErrorCodes.METHOD_NOT_ALLOWED;
-            default -> ErrorCodes.VALIDATION_FAILED;
-        };
     }
 
     private ResponseEntity<ProblemDetail> respond(HttpServletRequest request, HttpStatus status, String code,

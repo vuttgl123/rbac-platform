@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.rbac_platform.lib.core.error.ProblemErrorController;
 import com.rbac_platform.lib.core.event.EventDispatcher;
 import com.rbac_platform.lib.core.event.EventEnvelope;
 import com.rbac_platform.lib.core.event.EventHandler;
@@ -22,8 +23,8 @@ import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
-import org.springframework.boot.webmvc.error.DefaultErrorAttributes;
-import org.springframework.boot.webmvc.error.ErrorAttributes;
+import org.springframework.boot.test.context.runner.WebApplicationContextRunner;
+import org.springframework.boot.webmvc.error.ErrorController;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
@@ -38,11 +39,6 @@ class CoreAutoConfigurationTest {
     static class ServiceBeans {
 
         @Bean
-        ErrorAttributes serviceErrorAttributes() {
-            return new DefaultErrorAttributes();
-        }
-
-        @Bean
         RequestLoggingFilter serviceRequestLoggingFilter() {
             return new RequestLoggingFilter();
         }
@@ -51,9 +47,16 @@ class CoreAutoConfigurationTest {
     @Autowired
     private ApplicationContext context;
 
+    /** A context runner: CoreTestApplication's component scan also finds ProblemErrorController itself. */
     @Test
-    void backsOffWhenTheServiceDefinesItsOwnErrorAttributes() {
-        assertThat(context.getBeansOfType(ErrorAttributes.class)).containsOnlyKeys("serviceErrorAttributes");
+    void errorControllerIsProblemJsonAndBacksOff() {
+        WebApplicationContextRunner runner = new WebApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(CoreAutoConfiguration.class));
+
+        runner.run(ctx -> assertThat(ctx.getBeansOfType(ErrorController.class).values())
+                .singleElement().isInstanceOf(ProblemErrorController.class));
+        runner.withBean("serviceErrorController", ErrorController.class, () -> new ErrorController() {
+        }).run(ctx -> assertThat(ctx.getBeansOfType(ErrorController.class)).containsOnlyKeys("serviceErrorController"));
     }
 
     @Test

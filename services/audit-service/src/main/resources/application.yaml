@@ -13,6 +13,8 @@ spring:
 server:
   port: 8083
 rbac:
+  security:
+    issuer-prefix: ${IDENTITY_PUBLIC_URL:http://localhost:8081}/t/
   db:
     expected-role: audit_app
   batch:

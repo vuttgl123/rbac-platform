@@ -6,6 +6,9 @@ import com.rbac_platform.lib.batch.JobLaunchService;
 import com.rbac_platform.lib.batch.PartitionMaintenanceJob;
 import com.rbac_platform.lib.batch.ScheduledJobRunner;
 import com.rbac_platform.testsupport.AppDatabase;
+import com.rbac_platform.testsupport.MigratedDatabase;
+import com.rbac_platform.testsupport.Sql;
+import com.rbac_platform.testsupport.TestIssuer;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -13,6 +16,7 @@ import java.net.http.HttpResponse;
 import java.util.Base64;
 import java.util.Map;
 import java.util.UUID;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.batch.core.BatchStatus;
@@ -32,8 +36,16 @@ class AuditServiceApplicationTest {
 
     private static final String UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 
+    private static final TestIssuer issuer = TestIssuer.start();
+
+    @AfterAll
+    static void stopIssuer() {
+        issuer.close();
+    }
+
     @DynamicPropertySource
     static void database(DynamicPropertyRegistry registry) {
+        registry.add("rbac.security.issuer-prefix", () -> issuer.baseUrl() + "/t/");
         AppDatabase.register(registry, "audit_app");
     }
 
@@ -51,6 +63,12 @@ class AuditServiceApplicationTest {
 
     private HttpResponse<String> get(String path) throws Exception {
         HttpRequest request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + path)).GET().build();
+        return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private HttpResponse<String> get(String path, String token) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + path))
+                .header("Authorization", "Bearer " + token).GET().build();
         return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
     }
 
@@ -86,7 +104,7 @@ class AuditServiceApplicationTest {
     }
 
     @Test
-    void noGeneratedLoginExistsAndAnyBasicCredentialIsRejected(CapturedOutput output) throws Exception {
+    void basicCredentialsAreRejectedWithoutBasicChallenge(CapturedOutput output) throws Exception {
         String credentials = Base64.getEncoder().encodeToString("user:anything".getBytes());
         HttpRequest request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/anything"))
                 .header("Authorization", "Basic " + credentials).GET().build();
@@ -94,6 +112,29 @@ class AuditServiceApplicationTest {
         HttpResponse<String> response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
 
         assertThat(response.statusCode()).isEqualTo(401);
+        assertThat(String.join(",", response.headers().allValues("WWW-Authenticate"))).doesNotContain("Basic");
         assertThat(output.getAll()).doesNotContain("generated security password");
+    }
+
+    @Test
+    void validTokenIsAuthenticated() throws Exception {
+        UUID tenant = MigratedDatabase.get().insertTenant();
+        String slug = MigratedDatabase.get().inTx(null, null,
+                c -> Sql.one(c, String.class, "select slug from tenancy.tenants where id = ?", tenant));
+
+        HttpResponse<String> response = get("/anything", issuer.token(slug).tenant(tenant).sign());
+
+        // Past authentication, and there is no such route.
+        assertThat(response.statusCode()).isEqualTo(404);
+        assertThat(response.body()).contains("\"code\":\"not_found\"");
+    }
+
+    @Test
+    void unauthenticatedIsProblemJson() throws Exception {
+        HttpResponse<String> response = get("/anything");
+
+        assertThat(response.statusCode()).isEqualTo(401);
+        assertThat(response.headers().firstValue("Content-Type")).hasValueSatisfying(type -> assertThat(type).startsWith("application/problem+json"));
+        assertThat(response.body()).contains("\"code\":\"unauthenticated\"");
     }
 }

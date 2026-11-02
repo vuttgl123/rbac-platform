@@ -1,7 +1,10 @@
 package com.rbac_platform.lib.outbox;
 
+import com.rbac_platform.lib.core.CoreAutoConfiguration;
 import com.rbac_platform.lib.core.event.EventDispatcher;
+import com.rbac_platform.lib.core.http.ServiceRestClients;
 import com.rbac_platform.lib.db.DbAutoConfiguration;
+import com.rbac_platform.lib.outbox.publish.HttpOutboxPublisher;
 import com.rbac_platform.lib.outbox.publish.InProcessOutboxPublisher;
 import com.rbac_platform.lib.outbox.publish.LoggingOutboxPublisher;
 import com.rbac_platform.lib.outbox.publish.OutboxPublisher;
@@ -30,12 +33,14 @@ import tools.jackson.databind.json.JsonMapper;
  * The outbox of a service that sets rbac.outbox.schema; a service without that property gets nothing. Each strategy
  * (publisher, retry policy) backs off when the service declares its own bean; interceptors add up.
  */
-@AutoConfiguration(after = DbAutoConfiguration.class, afterName = "org.springframework.boot.jackson.autoconfigure.JacksonAutoConfiguration")
+@AutoConfiguration(after = {DbAutoConfiguration.class, CoreAutoConfiguration.class},
+        afterName = "org.springframework.boot.jackson.autoconfigure.JacksonAutoConfiguration")
 @ConditionalOnProperty("rbac.outbox.schema")
 @EnableConfigurationProperties(OutboxProperties.class)
 public class OutboxAutoConfiguration {
 
     private static final String PUBLISHER = "rbac.outbox.publisher";
+    private static final int MIN_TOKEN_LENGTH = 32;
     private static final String SHUTDOWN_PHASE_TIMEOUT = "spring.lifecycle.timeout-per-shutdown-phase";
     private static final Duration DEFAULT_SHUTDOWN_PHASE_TIMEOUT = Duration.ofSeconds(30);
 
@@ -72,6 +77,21 @@ public class OutboxAutoConfiguration {
     }
 
     @Bean
+    @ConditionalOnMissingBean(OutboxPublisher.class)
+    @ConditionalOnProperty(name = PUBLISHER, havingValue = "http")
+    HttpOutboxPublisher httpOutboxPublisher(ServiceRestClients clients, OutboxProperties properties) {
+        OutboxProperties.Http http = properties.http();
+        if (http.url() == null || http.url().isBlank()) {
+            throw new IllegalStateException("rbac.outbox.http.url is required when " + PUBLISHER + "=http");
+        }
+        if (http.internalToken() == null || http.internalToken().length() < MIN_TOKEN_LENGTH) {
+            throw new IllegalStateException("rbac.outbox.http.internal-token must be at least " + MIN_TOKEN_LENGTH
+                    + " characters when " + PUBLISHER + "=http");
+        }
+        return new HttpOutboxPublisher(clients.create(http.url()), http.internalToken());
+    }
+
+    @Bean
     @ConditionalOnMissingBean(RetryPolicy.class)
     ExponentialBackoffRetryPolicy outboxRetryPolicy(OutboxProperties properties) {
         // Thread-safe without contention: every draw goes to the calling thread's own generator.
@@ -93,7 +113,7 @@ public class OutboxAutoConfiguration {
     }
 
     /**
-     * The publisher is whichever bean exists: one of the two above, picked by name, or a service's (or another lib's)
+     * The publisher is whichever bean exists: one of the three above, picked by name, or a service's (or another lib's)
      * own. A name nobody provides fails startup here rather than at the first event.
      */
     @Bean

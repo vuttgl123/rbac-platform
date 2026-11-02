@@ -18,6 +18,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param lease        how long a claimed row is held before another relay may claim it again; at most an hour
  * @param maxAttempts  deliveries tried before a row is buried
  * @param backoff      delay between a failed delivery and the next one
+ * @param http         target of the {@code http} publisher; only checked when that publisher is selected
  */
 @ConfigurationProperties("rbac.outbox")
 public record OutboxProperties(String schema,
@@ -27,7 +28,20 @@ public record OutboxProperties(String schema,
                                @DefaultValue("500ms") Duration pollInterval,
                                @DefaultValue("60s") Duration lease,
                                @DefaultValue("10") int maxAttempts,
-                               @DefaultValue Backoff backoff) {
+                               @DefaultValue Backoff backoff,
+                               @DefaultValue Http http) {
+
+    /**
+     * @param url           full URL of the receiving endpoint, e.g. {@code https://audit/internal/v1/events}
+     * @param internalToken shared secret sent as X-Internal-Token; never logged
+     */
+    public record Http(String url, String internalToken) {
+
+        @Override
+        public String toString() {
+            return "Http[url=" + url + ", internalToken=***]";
+        }
+    }
 
     private static final Pattern SCHEMA = Pattern.compile("[a-z_][a-z0-9_]*");
     private static final Duration MAX_LEASE = Duration.ofHours(1);

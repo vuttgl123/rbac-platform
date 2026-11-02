@@ -6,6 +6,9 @@ import static org.mockito.Mockito.mock;
 import com.rbac_platform.lib.core.event.EventDispatcher;
 import com.rbac_platform.lib.core.event.EventHandlerRegistry;
 import com.rbac_platform.lib.core.event.UnhandledEventPolicy;
+import com.rbac_platform.lib.core.http.HttpClientProperties;
+import com.rbac_platform.lib.core.http.ServiceRestClients;
+import com.rbac_platform.lib.outbox.publish.HttpOutboxPublisher;
 import com.rbac_platform.lib.outbox.publish.InProcessOutboxPublisher;
 import com.rbac_platform.lib.outbox.publish.LoggingOutboxPublisher;
 import com.rbac_platform.lib.outbox.publish.OutboxPublisher;
@@ -16,6 +19,7 @@ import com.rbac_platform.lib.outbox.relay.TimingOutboxInterceptor;
 import com.rbac_platform.lib.outbox.retry.ExponentialBackoffRetryPolicy;
 import com.rbac_platform.lib.outbox.retry.RetryDecision;
 import com.rbac_platform.lib.outbox.retry.RetryPolicy;
+import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -32,6 +36,8 @@ class OutboxAutoConfigurationTest {
             .withBean(JdbcClient.class, () -> mock(JdbcClient.class))
             .withBean(JsonMapper.class, JsonMapper::new)
             .withBean(TransactionTemplate.class, () -> mock(TransactionTemplate.class))
+            .withBean(ServiceRestClients.class,
+                    () -> new ServiceRestClients(new HttpClientProperties(Duration.ofSeconds(1), Duration.ofSeconds(2))))
             .withBean(EventDispatcher.class,
                     () -> new EventDispatcher(new EventHandlerRegistry(List.of()), UnhandledEventPolicy.IGNORE))
             .withPropertyValues("rbac.outbox.schema=identity", "rbac.outbox.enabled=false");
@@ -51,6 +57,34 @@ class OutboxAutoConfigurationTest {
             assertThat(context).hasSingleBean(OutboxPublisher.class);
             assertThat(context.getBean(OutboxPublisher.class)).isInstanceOf(InProcessOutboxPublisher.class);
         });
+    }
+
+    @Test
+    void httpPublisherNeedsUrl() {
+        runner.withPropertyValues("rbac.outbox.publisher=http", "rbac.outbox.http.internal-token=" + "t".repeat(32))
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context).getFailure().hasStackTraceContaining("rbac.outbox.http.url");
+                });
+    }
+
+    @Test
+    void httpPublisherNeedsLongEnoughToken() {
+        runner.withPropertyValues("rbac.outbox.publisher=http", "rbac.outbox.http.url=http://localhost:1/e",
+                "rbac.outbox.http.internal-token=short").run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context).getFailure().hasStackTraceContaining("rbac.outbox.http.internal-token");
+                });
+    }
+
+    @Test
+    void httpPublisherIsSelectedByName() {
+        runner.withPropertyValues("rbac.outbox.publisher=http", "rbac.outbox.http.url=http://localhost:1/e",
+                        "rbac.outbox.http.internal-token=" + "t".repeat(32))
+                .run(context -> {
+                    assertThat(context).hasNotFailed().hasSingleBean(OutboxPublisher.class);
+                    assertThat(context.getBean(OutboxPublisher.class)).isInstanceOf(HttpOutboxPublisher.class);
+                });
     }
 
     @Test

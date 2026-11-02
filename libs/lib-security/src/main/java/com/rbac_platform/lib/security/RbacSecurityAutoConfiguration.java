@@ -5,6 +5,8 @@ import com.rbac_platform.lib.core.http.HttpClientProperties;
 import com.rbac_platform.lib.core.http.ServiceRestClients;
 import com.rbac_platform.lib.security.access.AccessChecker;
 import com.rbac_platform.lib.security.access.HttpAccessChecker;
+import jakarta.servlet.Filter;
+import jakarta.servlet.http.HttpServletRequest;
 import java.util.List;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -17,6 +19,8 @@ import org.springframework.boot.security.autoconfigure.actuate.web.servlet.Manag
 import org.springframework.boot.security.autoconfigure.web.servlet.ServletWebSecurityAutoConfiguration;
 import org.springframework.boot.security.oauth2.server.resource.autoconfigure.web.OAuth2ResourceServerWebSecurityAutoConfiguration;
 import org.springframework.context.annotation.Bean;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpMethod;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -26,8 +30,8 @@ import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationProvider;
 import org.springframework.security.oauth2.server.resource.authentication.JwtIssuerAuthenticationManagerResolver;
-import org.springframework.security.oauth2.server.resource.web.authentication.BearerTokenAuthenticationFilter;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.AnonymousAuthenticationFilter;
 import org.springframework.web.method.support.HandlerMethodArgumentResolver;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
@@ -37,6 +41,10 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
  * Ordered before Boot's security auto-configurations so their default chain (form login, HTTP basic) and
  * generated in-memory user back off: our {@link SecurityFilterChain} and issuer resolver beans exist by then.
  * A service's own bean of any of these types makes ours back off.
+ *
+ * <p>There are two chains. {@code /internal/**} has its own, ordered first, guarded only by the
+ * {@link InternalTokenFilter}. It stays when a service defines its own {@link SecurityFilterChain}: that replaces
+ * the main chain only, so a service cannot lose the internal guard by customising user-facing security.
  */
 @AutoConfiguration(before = {SecurityAutoConfiguration.class, ServletWebSecurityAutoConfiguration.class,
         UserDetailsServiceAutoConfiguration.class, ManagementWebSecurityAutoConfiguration.class,
@@ -44,6 +52,8 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
 @EnableConfigurationProperties(SecurityProperties.class)
 public class RbacSecurityAutoConfiguration {
+
+    static final String INTERNAL_PATHS = "/internal/**";
 
     @Bean
     @ConditionalOnMissingBean
@@ -84,11 +94,35 @@ public class RbacSecurityAutoConfiguration {
         return new ProblemAccessDeniedHandler(problems);
     }
 
+    /**
+     * Service-to-service calls: the shared secret is the only credential, a bearer token is neither needed nor
+     * looked at. Highest precedence, so no other chain sees these paths.
+     */
     @Bean
-    @ConditionalOnMissingBean(SecurityFilterChain.class)
+    @Order(Ordered.HIGHEST_PRECEDENCE)
+    @ConditionalOnMissingBean
+    InternalSecurityFilterChain rbacInternalSecurityFilterChain(HttpSecurity http, SecurityProperties properties,
+            ProblemWriter problems) {
+        http.securityMatcher(INTERNAL_PATHS)
+                .csrf(AbstractHttpConfigurer::disable)
+                .httpBasic(AbstractHttpConfigurer::disable)
+                .formLogin(AbstractHttpConfigurer::disable)
+                .logout(AbstractHttpConfigurer::disable)
+                .requestCache(AbstractHttpConfigurer::disable)
+                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .addFilterBefore(new InternalTokenFilter(properties.internalToken(), problems),
+                        AnonymousAuthenticationFilter.class)
+                // Only requests that passed the filter get this far.
+                .authorizeHttpRequests(requests -> requests.anyRequest().permitAll());
+        return new InternalSecurityFilterChain(http.build());
+    }
+
+    /** Backs off for any service-defined chain, but not for {@link #rbacInternalSecurityFilterChain}. */
+    @Bean
+    @ConditionalOnMissingBean(value = SecurityFilterChain.class, ignored = InternalSecurityFilterChain.class)
     SecurityFilterChain rbacSecurityFilterChain(HttpSecurity http, SecurityProperties properties,
             JwtIssuerAuthenticationManagerResolver issuers, ProblemAuthenticationEntryPoint entryPoint,
-            ProblemAccessDeniedHandler accessDenied, ProblemWriter problems) {
+            ProblemAccessDeniedHandler accessDenied) {
         List<String> publicPaths = properties.publicPaths();
         http.csrf(AbstractHttpConfigurer::disable)
                 .httpBasic(AbstractHttpConfigurer::disable)
@@ -101,16 +135,15 @@ public class RbacSecurityAutoConfiguration {
                     // No tenant token may read the other actuator endpoints (env, configprops, ...).
                     requests.requestMatchers("/actuator/**").denyAll();
                     requests.requestMatchers("/error").permitAll();
-                    // Ordered before the public paths so no public pattern can open /internal/**; the
-                    // InternalTokenFilter, not this rule, is what authenticates those calls.
-                    requests.requestMatchers("/internal/**").permitAll();
+                    // These requests belong to the internal chain, which runs first and requires the internal
+                    // token. Denied here, before the public paths, so that no public pattern opens them should
+                    // one ever reach this chain.
+                    requests.requestMatchers(INTERNAL_PATHS).denyAll();
                     if (!publicPaths.isEmpty()) {
                         requests.requestMatchers(publicPaths.toArray(String[]::new)).permitAll();
                     }
                     requests.anyRequest().authenticated();
                 })
-                .addFilterBefore(new InternalTokenFilter(properties.internalToken(), problems),
-                        BearerTokenAuthenticationFilter.class)
                 .exceptionHandling(exceptions -> exceptions
                         .authenticationEntryPoint(entryPoint)
                         .accessDeniedHandler(accessDenied))
@@ -139,6 +172,29 @@ public class RbacSecurityAutoConfiguration {
     @ConditionalOnMissingBean
     CallerWebMvcConfigurer callerWebMvcConfigurer(CallerArgumentResolver callerArgumentResolver) {
         return new CallerWebMvcConfigurer(callerArgumentResolver);
+    }
+
+    /**
+     * The {@code /internal/**} chain. Its own type so that the main chain's back-off condition can ignore it
+     * while still backing off for any chain a service defines.
+     */
+    public static final class InternalSecurityFilterChain implements SecurityFilterChain {
+
+        private final SecurityFilterChain delegate;
+
+        public InternalSecurityFilterChain(SecurityFilterChain delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public boolean matches(HttpServletRequest request) {
+            return delegate.matches(request);
+        }
+
+        @Override
+        public List<Filter> getFilters() {
+            return delegate.getFilters();
+        }
     }
 
     /** Registers the {@link CallerArgumentResolver} with Spring MVC; its own type so a service can replace it. */

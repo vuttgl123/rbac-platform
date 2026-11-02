@@ -48,4 +48,19 @@
 			<artifactId>spring-security-oauth2-jose</artifactId>
 		</dependency>
 	</dependencies>
+
+	<build>
+		<plugins>
+			<plugin>
+				<!-- scripts/dev.sh runs DevDatabase through exec:java -->
+				<groupId>org.codehaus.mojo</groupId>
+				<artifactId>exec-maven-plugin</artifactId>
+				<version>3.5.0</version>
+				<configuration>
+					<mainClass>com.rbac_platform.testsupport.DevDatabase</mainClass>
+					<classpathScope>test</classpathScope>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
 </project>

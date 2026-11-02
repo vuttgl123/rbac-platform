@@ -38,7 +38,7 @@ public final class MigratedDatabase {
             synchronized (MigratedDatabase.class) {
                 db = instance;
                 if (db == null) {
-                    db = start();
+                    db = start(0);
                     instance = db;
                 }
             }
@@ -46,9 +46,18 @@ public final class MigratedDatabase {
         return db;
     }
 
-    private static MigratedDatabase start() {
+    /**
+     * A migrated database that is not the per-JVM singleton, for the dev stack. Port 0 picks a free port.
+     * The caller owns it; a shutdown hook closes Postgres when the JVM exits.
+     */
+    public static MigratedDatabase startStandalone(int port) {
+        return start(port);
+    }
+
+    /** @param port 0 for a random free port */
+    private static MigratedDatabase start(int port) {
         try {
-            EmbeddedPostgres pg = EmbeddedPostgres.start();
+            EmbeddedPostgres pg = EmbeddedPostgres.builder().setPort(port).start();
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 try {
                     pg.close();

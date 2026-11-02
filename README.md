@@ -104,7 +104,33 @@ outside the transaction and silently reads zero rows.
   past it the context closes the data source under a running job, which is then left `STARTED` until it is recovered
   (`JobLaunchService.recover`).
 
+## Running everything (dev)
+
+```
+scripts/dev.sh
+```
+
+One command starts a single migrated embedded Postgres (port 54329, `DEV_DB_PORT` to change it) and identity, authz and
+audit on it, then the Vite frontend. The three services share that one database, which a per-service `spring-boot:test-run`
+does not give you (each starts a private Postgres). The script first runs `./mvnw -q install -DskipTests`, exports every
+variable the services need (`DB_URL`, the three `*_DB_USER` / `*_DB_PASSWORD` pairs, `IDENTITY_PUBLIC_URL`, `AUTHZ_URL`,
+`RBAC_INTERNAL_TOKEN`), waits for the health endpoints, and prints a table of URLs including the one shared `DB_URL`.
+Exported values outrank `.env`, so a filled-in `.env` (Supabase) is not used.
+
+| Option | Effect |
+| --- | --- |
+| `--no-install` | Skip the Maven install (nothing changed since the last run) |
+| `--no-fe` | Do not start the frontend |
+
+Output of each process is prefixed (`[db]`, `[identity]`, `[authz]`, `[audit]`, `[fe]`). Ctrl+C stops everything, Postgres
+included; data is gone afterwards. `RBAC_INTERNAL_TOKEN` is generated per run unless you export one. The frontend runs on
+`http://localhost:5173` and proxies `/api/identity`, `/api/authz` and `/api/audit` to ports 8081, 8082 and 8083 with the
+prefix removed.
+
 ## Running a service locally
+
+To run one service in isolation, use its `Test<Svc>ServiceApplication` through `spring-boot:test-run` as below
+(it needs no `.env`, and no other service is running; `RBAC_INTERNAL_TOKEN` and the other settings come from the launcher).
 
 Each `Test<Svc>ServiceApplication` (in `src/test`) starts the service against a throwaway embedded Postgres with every
 migration applied, connected as the service's own role. No Docker, no `.env` needed; data is gone when the process stops.
@@ -131,6 +157,9 @@ Copy `.env.example` to `.env` and fill it in; never commit it. Services read `.e
 | `IDENTITY_DB_USER` / `IDENTITY_DB_PASSWORD` | identity-service | Login of `identity_app` (user is `<role>.<project-ref>` through the pooler) |
 | `AUTHZ_DB_USER` / `AUTHZ_DB_PASSWORD` | authz-service | Login of `authz_app` |
 | `AUDIT_DB_USER` / `AUDIT_DB_PASSWORD` | audit-service | Login of `audit_app` |
+| `IDENTITY_PUBLIC_URL` | all services | Public base URL of identity-service; token issuer prefix is `<url>/t/` (default `http://localhost:8081`) |
+| `AUTHZ_URL` | identity, audit | Base URL of authz-service used for access checks (default `http://localhost:8082`) |
+| `RBAC_INTERNAL_TOKEN` | all services | Shared secret for service-to-service calls; at least 32 characters, no whitespace |
 | `DB_POOL_SIZE` | all services | Hikari maximum pool size (default 5) |
 | `LOG_LEVEL_APP` | all services | Level for `com.rbac_platform` (default INFO) |
 | `LOG_LEVEL_SQL` | all services | DEBUG logs every SQL statement (default INFO) |

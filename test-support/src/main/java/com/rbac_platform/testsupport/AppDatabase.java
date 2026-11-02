@@ -22,10 +22,14 @@ public final class AppDatabase {
 
     /** Platform roles are NOLOGIN after migration (logins are bootstrapped out of band); local connections are trusted. */
     public static MigratedDatabase enableLogin(String role) {
+        return enableLogin(MigratedDatabase.get(), role);
+    }
+
+    /** Same as {@link #enableLogin(String)} for a given database, such as the standalone dev one. */
+    public static MigratedDatabase enableLogin(MigratedDatabase db, String role) {
         if (!ROLE_NAME.matcher(role).matches()) {
             throw new IllegalArgumentException("Not a plain role name: " + role);
         }
-        MigratedDatabase db = MigratedDatabase.get();
         db.inTx(null, null, c -> Sql.exec(c, "ALTER ROLE " + role + " LOGIN"));
         return db;
     }

@@ -28,6 +28,25 @@ class SecurityPropertiesTest {
     }
 
     @Test
+    void issuerPrefixMustBeAnAbsoluteHttpUrlWithoutEmptySegments() {
+        for (String bad : new String[] {"/t/", "https://id.example.com//t/", "id.example.com/t/", "https:///t/",
+                "ftp://id.example.com/t/", "https://id.example.com/a//t/", "https://id.example.com/?a=/t/",
+                "https://id.example.com/a/../t/", "https://id.example.com/./t/", "https://id.example.com/t /t/"}) {
+            assertThatThrownBy(() -> withPrefix(bad)).as(bad)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("rbac.security.issuer-prefix");
+        }
+    }
+
+    @Test
+    void issuerPrefixAcceptsHttpAndHttpsUrls() {
+        for (String good : new String[] {"https://id.example.com/t/", "http://localhost:8081/t/",
+                "http://127.0.0.1:41234/t/", "https://example.com/identity/t/", "HTTPS://id.example.com/t/"}) {
+            assertThat(withPrefix(good).issuerPrefix()).isEqualTo(good);
+        }
+    }
+
+    @Test
     void internalTokenIsRequired() {
         assertThatThrownBy(() -> withToken(null))
                 .isInstanceOf(IllegalArgumentException.class)

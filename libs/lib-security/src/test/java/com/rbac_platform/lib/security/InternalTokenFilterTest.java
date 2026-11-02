@@ -122,7 +122,8 @@ class InternalTokenFilterTest {
 
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"//internal/test/ping", "/x/../internal/test/ping",
-            "/internal;a=b/test/ping", "/internal%2Ftest/ping", "/INTERNAL/test/ping", "/internal/test/ping/"})
+            "/internal;a=b/test/ping", "/internal%2Ftest/ping", "/INTERNAL/test/ping", "/internal/test/ping/",
+            "/%69nternal/test/ping"})
     void pathTrickeryNeverReachesTheControllerWithoutTheToken(String rawPath) throws Exception {
         UUID tenant = MigratedDatabase.get().insertTenant();
         String slug = MigratedDatabase.get().inTx(null, null,

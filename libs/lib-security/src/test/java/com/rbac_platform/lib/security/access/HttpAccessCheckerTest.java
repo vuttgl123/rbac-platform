@@ -17,11 +17,15 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.slf4j.MDC;
 import org.springframework.http.HttpStatus;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
+@ExtendWith(OutputCaptureExtension.class)
 class HttpAccessCheckerTest {
 
     private final JsonMapper json = JsonMapper.builder().build();
@@ -145,5 +149,40 @@ class HttpAccessCheckerTest {
         server.stop(0);
 
         assertUnavailable(checker);
+    }
+
+    @Test
+    void rejectedTokenIsUnauthenticated(CapturedOutput output) throws Exception {
+        HttpAccessChecker checker = checkerAnswering(401, "{\"code\":\"token_expired\",\"detail\":\"secret-detail\"}");
+
+        assertThatThrownBy(() -> checker.require(caller, "admin", ObjectRef.tenant(tenant)))
+                .isInstanceOfSatisfying(ApiException.class, e -> {
+                    assertThat(e.status()).isEqualTo(HttpStatus.UNAUTHORIZED);
+                    assertThat(e.code()).isEqualTo("unauthenticated");
+                });
+        assertThat(output).contains("HTTP 401").contains("token_expired")
+                .doesNotContain("tok-123").doesNotContain("secret-detail");
+    }
+
+    @Test
+    void clientErrorIsUnavailableAndLogsStatusAndCode(CapturedOutput output) throws Exception {
+        assertUnavailable(checkerAnswering(400, "{\"code\":\"validation_failed\",\"detail\":\"secret-detail\"}"));
+
+        assertThat(output).contains("HTTP 400").contains("validation_failed")
+                .doesNotContain("tok-123").doesNotContain("secret-detail");
+    }
+
+    @Test
+    void forgedCodeIsNotLogged(CapturedOutput output) throws Exception {
+        assertUnavailable(checkerAnswering(400, "{\"code\":\"x\\nFAKE LOG LINE\"}"));
+
+        assertThat(output).contains("HTTP 400").doesNotContain("FAKE LOG LINE");
+    }
+
+    @Test
+    void unexpectedResultIsLogged(CapturedOutput output) throws Exception {
+        assertUnavailable(checkerAnswering(200, "{\"result\":\"maybe\"}"));
+
+        assertThat(output).contains("maybe").doesNotContain("tok-123");
     }
 }

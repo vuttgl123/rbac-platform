@@ -45,6 +45,7 @@ class ResourceServerTest {
         registry.add("rbac.security.issuer-prefix", () -> issuer.baseUrl() + "/t/");
         registry.add("rbac.security.public-paths[0]", () -> "/test/public/**");
         registry.add("rbac.security.tenant-cache-ttl", () -> "200ms");
+        registry.add("rbac.security.internal-token", () -> "x".repeat(40));
         // Re-enables Boot's generated user despite oauth2 on the classpath; only our beans make it back off.
         registry.add("spring.security.user.name", () -> "someone");
     }
@@ -292,17 +293,6 @@ class ResourceServerTest {
         String token = issuer.token(slug).tenant(tenantId).sign();
 
         assertProblem(get("/test/denied", token), 403, "forbidden");
-    }
-
-    @Test
-    void internalPathsAreClosedUntilGuarded() throws Exception {
-        String token = issuer.token(slug).tenant(tenantId).sign();
-
-        HttpResponse<String> withToken = get("/internal/test/anything", token);
-        assertProblem(withToken, 403, "forbidden");
-        assertThat(withToken.body()).doesNotContain("reached");
-
-        assertUnauthenticated(get("/internal/test/anything", null));
     }
 
     @Test

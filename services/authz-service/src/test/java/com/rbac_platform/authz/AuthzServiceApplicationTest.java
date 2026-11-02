@@ -52,6 +52,7 @@ class AuthzServiceApplicationTest {
     @DynamicPropertySource
     static void database(DynamicPropertyRegistry registry) {
         registry.add("rbac.security.issuer-prefix", () -> issuer.baseUrl() + "/t/");
+        registry.add("rbac.security.internal-token", () -> "x".repeat(40));
         AppDatabase.register(registry, "authz_app");
     }
 

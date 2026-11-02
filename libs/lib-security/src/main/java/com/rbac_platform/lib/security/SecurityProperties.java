@@ -14,7 +14,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param audience       the {@code aud} every access token must carry
  * @param publicPaths    request patterns reachable without a token, besides the health check and {@code /error}
  * @param tenantCacheTtl how long a tenant's status is cached; a suspended tenant's tokens stop working within it
- * @param internalToken  shared secret for {@code /internal/**} calls between services (enforced by a later filter)
+ * @param internalToken  shared secret for {@code /internal/**} calls between services (required, at least 32 characters; see {@link InternalTokenFilter})
  * @param authzUrl       base URL of authz-service, for services that ask it for decisions
  */
 @ConfigurationProperties("rbac.security")
@@ -36,6 +36,10 @@ public record SecurityProperties(
         }
         if (tenantCacheTtl == null || tenantCacheTtl.isNegative() || tenantCacheTtl.isZero()) {
             throw new IllegalArgumentException("rbac.security.tenant-cache-ttl must be positive");
+        }
+        if (internalToken == null || internalToken.length() < 32) {
+            throw new IllegalArgumentException(
+                    "rbac.security.internal-token is required and must be at least 32 characters");
         }
         publicPaths = publicPaths == null ? List.of() : List.copyOf(publicPaths);
     }

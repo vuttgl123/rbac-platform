@@ -18,6 +18,10 @@ public class TestAuditServiceApplication {
         System.setProperty("spring.datasource.url", db.jdbcUrl());
         System.setProperty("spring.datasource.username", "audit_app");
         System.setProperty("spring.datasource.password", "unused-trust-auth");
+        if (System.getenv("RBAC_INTERNAL_TOKEN") == null) {
+            // Dev-only shared secret for /internal/**; real deployments set RBAC_INTERNAL_TOKEN.
+            System.setProperty("rbac.security.internal-token", "0123456789abcdef".repeat(4));
+        }
         System.out.println("Embedded Postgres (superuser postgres, no password): " + db.jdbcUrl());
         SpringApplication.from(AuditServiceApplication::main).run(args);
     }

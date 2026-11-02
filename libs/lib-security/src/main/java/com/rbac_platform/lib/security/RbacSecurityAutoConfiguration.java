@@ -2,9 +2,13 @@ package com.rbac_platform.lib.security;
 
 import com.rbac_platform.lib.core.error.ProblemWriter;
 import com.rbac_platform.lib.core.http.HttpClientProperties;
+import com.rbac_platform.lib.core.http.ServiceRestClients;
+import com.rbac_platform.lib.security.access.AccessChecker;
+import com.rbac_platform.lib.security.access.HttpAccessChecker;
 import java.util.List;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.security.autoconfigure.SecurityAutoConfiguration;
@@ -22,6 +26,7 @@ import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationProvider;
 import org.springframework.security.oauth2.server.resource.authentication.JwtIssuerAuthenticationManagerResolver;
+import org.springframework.security.oauth2.server.resource.web.authentication.BearerTokenAuthenticationFilter;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.web.method.support.HandlerMethodArgumentResolver;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
@@ -83,7 +88,7 @@ public class RbacSecurityAutoConfiguration {
     @ConditionalOnMissingBean(SecurityFilterChain.class)
     SecurityFilterChain rbacSecurityFilterChain(HttpSecurity http, SecurityProperties properties,
             JwtIssuerAuthenticationManagerResolver issuers, ProblemAuthenticationEntryPoint entryPoint,
-            ProblemAccessDeniedHandler accessDenied) {
+            ProblemAccessDeniedHandler accessDenied, ProblemWriter problems) {
         List<String> publicPaths = properties.publicPaths();
         http.csrf(AbstractHttpConfigurer::disable)
                 .httpBasic(AbstractHttpConfigurer::disable)
@@ -96,13 +101,16 @@ public class RbacSecurityAutoConfiguration {
                     // No tenant token may read the other actuator endpoints (env, configprops, ...).
                     requests.requestMatchers("/actuator/**").denyAll();
                     requests.requestMatchers("/error").permitAll();
-                    // Fails closed until the internal-token filter guards /internal/** (user tokens never open it).
-                    requests.requestMatchers("/internal/**").denyAll();
+                    // Ordered before the public paths so no public pattern can open /internal/**; the
+                    // InternalTokenFilter, not this rule, is what authenticates those calls.
+                    requests.requestMatchers("/internal/**").permitAll();
                     if (!publicPaths.isEmpty()) {
                         requests.requestMatchers(publicPaths.toArray(String[]::new)).permitAll();
                     }
                     requests.anyRequest().authenticated();
                 })
+                .addFilterBefore(new InternalTokenFilter(properties.internalToken(), problems),
+                        BearerTokenAuthenticationFilter.class)
                 .exceptionHandling(exceptions -> exceptions
                         .authenticationEntryPoint(entryPoint)
                         .accessDeniedHandler(accessDenied))
@@ -111,6 +119,14 @@ public class RbacSecurityAutoConfiguration {
                         .authenticationEntryPoint(entryPoint)
                         .accessDeniedHandler(accessDenied));
         return http.build();
+    }
+
+    /** Only for services configured with an authz-service URL; authz-service itself supplies an in-process one. */
+    @Bean
+    @ConditionalOnMissingBean(AccessChecker.class)
+    @ConditionalOnProperty("rbac.security.authz-url")
+    HttpAccessChecker httpAccessChecker(ServiceRestClients clients, SecurityProperties properties) {
+        return new HttpAccessChecker(clients.create(properties.authzUrl()));
     }
 
     @Bean

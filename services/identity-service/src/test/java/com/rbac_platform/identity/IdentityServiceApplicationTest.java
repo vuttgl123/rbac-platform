@@ -48,6 +48,7 @@ class IdentityServiceApplicationTest {
     @DynamicPropertySource
     static void database(DynamicPropertyRegistry registry) {
         registry.add("rbac.security.issuer-prefix", () -> issuer.baseUrl() + "/t/");
+        registry.add("rbac.security.internal-token", () -> "x".repeat(40));
         AppDatabase.register(registry, "identity_app");
     }
 
@@ -118,6 +119,7 @@ class IdentityServiceApplicationTest {
         // Command-line arguments outrank the application.yaml and db-defaults.yaml values for these keys.
         assertThatThrownBy(() -> new SpringApplicationBuilder(IdentityServiceApplication.class).run(
                 "--server.port=0",
+                "--rbac.security.internal-token=" + "x".repeat(40),
                 "--spring.datasource.url=" + db.jdbcUrl(),
                 "--spring.datasource.username=authz_app",
                 // Without a password the run would fail on the unresolved ${IDENTITY_DB_PASSWORD}, not on the role check.

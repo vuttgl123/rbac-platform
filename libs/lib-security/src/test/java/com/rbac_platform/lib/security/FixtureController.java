@@ -28,7 +28,7 @@ class FixtureController {
         return "unreachable";
     }
 
-    @GetMapping("/internal/test/anything")
+    @GetMapping("/internal/test/ping")
     String internal() {
         return "reached";
     }

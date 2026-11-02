@@ -14,6 +14,8 @@ server:
 rbac:
   security:
     issuer-prefix: ${IDENTITY_PUBLIC_URL:http://localhost:8081}/t/
+    internal-token: ${RBAC_INTERNAL_TOKEN}
+    authz-url: ${AUTHZ_URL:http://localhost:8082}
     public-paths: ["/t/*/auth/**", "/t/*/.well-known/**"]
   db:
     expected-role: identity_app
